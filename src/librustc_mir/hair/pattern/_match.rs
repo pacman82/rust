@@ -839,7 +839,7 @@ fn pat_constructors<'tcx>(cx: &mut MatchCheckCtxt,
             Some(vec![Variant(adt_def.variants[variant_index].did)]),
         PatternKind::Constant { value } =>
             Some(vec![ConstantValue(value)]),
-        PatternKind::Range { lo, hi, end } =>
+        PatternKind::Range { lo, hi, ty: _, end } =>
             Some(vec![ConstantRange(lo, hi, end)]),
         PatternKind::Array { .. } => match pcx.ty.sty {
             ty::TyArray(_, length) => Some(vec![
@@ -1106,7 +1106,7 @@ fn specialize<'p, 'a: 'p, 'tcx: 'a>(
             }
         }
 
-        PatternKind::Range { lo, hi, ref end } => {
+        PatternKind::Range { lo, hi, ty: _, ref end } => {
             match constructor_covered_by_range(
                 cx.tcx,
                 constructor, lo, hi, end.clone(), lo.ty,

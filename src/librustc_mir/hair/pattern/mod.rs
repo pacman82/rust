@@ -102,6 +102,7 @@ pub enum PatternKind<'tcx> {
     Range {
         lo: &'tcx ty::Const<'tcx>,
         hi: &'tcx ty::Const<'tcx>,
+        ty: Ty<'tcx>,
         end: RangeEnd,
     },
 
@@ -238,7 +239,7 @@ impl<'tcx> fmt::Display for Pattern<'tcx> {
             PatternKind::Constant { value } => {
                 print_const_val(value, f)
             }
-            PatternKind::Range { lo, hi, end } => {
+            PatternKind::Range { lo, hi, ty: _, end } => {
                 print_const_val(lo, f)?;
                 match end {
                     RangeEnd::Included => write!(f, "...")?,
@@ -367,7 +368,7 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                         );
                         match (end, cmp) {
                             (RangeEnd::Excluded, Some(Ordering::Less)) =>
-                                PatternKind::Range { lo, hi, end },
+                                PatternKind::Range { lo, hi, ty, end },
                             (RangeEnd::Excluded, _) => {
                                 span_err!(
                                     self.tcx.sess,
@@ -399,7 +400,7 @@ impl<'a, 'tcx> PatternContext<'a, 'tcx> {
                                 err.emit();
                                 PatternKind::Wild
                             },
-                            (RangeEnd::Included, Some(_)) => PatternKind::Range { lo, hi, end },
+                            (RangeEnd::Included, Some(_)) => PatternKind::Range { lo, hi, ty, end },
                         }
                     }
                     _ => PatternKind::Wild
@@ -1011,10 +1012,12 @@ impl<'tcx> PatternFoldable<'tcx> for PatternKind<'tcx> {
             PatternKind::Range {
                 lo,
                 hi,
+                ty,
                 end,
             } => PatternKind::Range {
                 lo: lo.fold_with(folder),
                 hi: hi.fold_with(folder),
+                ty: ty.fold_with(folder),
                 end,
             },
             PatternKind::Slice {
