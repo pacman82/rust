@@ -256,7 +256,7 @@ pub enum Constructor<'tcx> {
     /// Literal values.
     ConstantValue(&'tcx ty::Const<'tcx>),
     /// Ranges of literal values (`2...5` and `2..5`).
-    ConstantRange(&'tcx ty::Const<'tcx>, &'tcx ty::Const<'tcx>, RangeEnd),
+    ConstantRange(u128, u128, Ty<'tcx>, RangeEnd),
     /// Array patterns of length n.
     Slice(u64),
 }
@@ -825,7 +825,7 @@ fn is_useful_specialized<'p, 'a:'p, 'tcx: 'a>(
 /// `[a, b, ..tail]` can match a slice of length 2, 3, 4 and so on.
 ///
 /// Returns None in case of a catch-all, which can't be specialized.
-fn pat_constructors<'tcx>(cx: &mut MatchCheckCtxt,
+fn pat_constructors<'tcx>(cx: &mut MatchCheckCtxt<'_, 'tcx>,
                           pat: &Pattern<'tcx>,
                           pcx: PatternContext)
                           -> Option<Vec<Constructor<'tcx>>>
@@ -839,8 +839,13 @@ fn pat_constructors<'tcx>(cx: &mut MatchCheckCtxt,
             Some(vec![Variant(adt_def.variants[variant_index].did)]),
         PatternKind::Constant { value } =>
             Some(vec![ConstantValue(value)]),
-        PatternKind::Range { lo, hi, ty: _, end } =>
-            Some(vec![ConstantRange(lo, hi, end)]),
+        PatternKind::Range { lo, hi, ty, end } =>
+            Some(vec![ConstantRange(
+                lo.to_bits(cx.tcx, ty::ParamEnv::empty().and(ty)).unwrap(),
+                hi.to_bits(cx.tcx, ty::ParamEnv::empty().and(ty)).unwrap(),
+                ty,
+                end,
+            )]),
         PatternKind::Array { .. } => match pcx.ty.sty {
             ty::TyArray(_, length) => Some(vec![
                 Slice(length.unwrap_usize(cx.tcx))
@@ -997,17 +1002,33 @@ fn constructor_covered_by_range<'a, 'tcx>(
                       (end == RangeEnd::Included && to == Ordering::Equal);
             Ok(some_or_ok!(cmp_from(value)) && end)
         },
-        ConstantRange(from, to, RangeEnd::Included) => {
-            let to = some_or_ok!(cmp_to(to));
+        ConstantRange(from, to, ty, RangeEnd::Included) => {
+            let to = some_or_ok!(cmp_to(ty::Const::from_bits(
+                tcx,
+                to,
+                ty::ParamEnv::empty().and(ty),
+            )));
             let end = (to == Ordering::Less) ||
                       (end == RangeEnd::Included && to == Ordering::Equal);
-            Ok(some_or_ok!(cmp_from(from)) && end)
+            Ok(some_or_ok!(cmp_from(ty::Const::from_bits(
+                tcx,
+                from,
+                ty::ParamEnv::empty().and(ty),
+            ))) && end)
         },
-        ConstantRange(from, to, RangeEnd::Excluded) => {
-            let to = some_or_ok!(cmp_to(to));
+        ConstantRange(from, to, ty, RangeEnd::Excluded) => {
+            let to = some_or_ok!(cmp_to(ty::Const::from_bits(
+                tcx,
+                to,
+                ty::ParamEnv::empty().and(ty)
+            )));
             let end = (to == Ordering::Less) ||
                       (end == RangeEnd::Excluded && to == Ordering::Equal);
-            Ok(some_or_ok!(cmp_from(from)) && end)
+            Ok(some_or_ok!(cmp_from(ty::Const::from_bits(
+                tcx,
+                from,
+                ty::ParamEnv::empty().and(ty)))
+            ) && end)
         }
         Single => Ok(true),
         _ => bug!(),
@@ -1106,10 +1127,10 @@ fn specialize<'p, 'a: 'p, 'tcx: 'a>(
             }
         }
 
-        PatternKind::Range { lo, hi, ty: _, ref end } => {
+        PatternKind::Range { lo, hi, ty, ref end } => {
             match constructor_covered_by_range(
                 cx.tcx,
-                constructor, lo, hi, end.clone(), lo.ty,
+                constructor, lo, hi, end.clone(), ty,
             ) {
                 Ok(true) => Some(vec![]),
                 Ok(false) => None,
