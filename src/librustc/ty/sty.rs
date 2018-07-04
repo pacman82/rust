@@ -12,7 +12,7 @@
 
 use hir::def_id::DefId;
 
-use middle::const_val::ConstVal;
+use mir::interpret::ConstValue;
 use middle::region;
 use polonius_engine::Atom;
 use rustc_data_structures::indexed_vec::Idx;
@@ -20,12 +20,12 @@ use ty::subst::{Substs, Subst, Kind, UnpackedKind};
 use ty::{self, AdtDef, TypeFlags, Ty, TyCtxt, TypeFoldable};
 use ty::{Slice, TyS, ParamEnvAnd, ParamEnv};
 use util::captures::Captures;
-use mir::interpret::{Scalar, Pointer, Value, ConstValue};
+use mir::interpret::{Scalar, Pointer, Value};
 
 use std::iter;
 use std::cmp::Ordering;
 use rustc_target::spec::abi;
-use syntax::ast::{self, Name};
+use syntax::ast::{self, Ident};
 use syntax::symbol::{keywords, InternedString};
 
 use serialize;
@@ -496,7 +496,9 @@ pub enum ExistentialPredicate<'tcx> {
 }
 
 impl<'a, 'gcx, 'tcx> ExistentialPredicate<'tcx> {
-    pub fn cmp(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>, other: &Self) -> Ordering {
+    /// Compares via an ordering that will not change if modules are reordered or other changes are
+    /// made to the tree. In particular, this ordering is preserved across incremental compilations.
+    pub fn stable_cmp(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>, other: &Self) -> Ordering {
         use self::ExistentialPredicate::*;
         match (*self, *other) {
             (Trait(_), Trait(_)) => Ordering::Equal,
@@ -610,6 +612,15 @@ pub struct TraitRef<'tcx> {
 impl<'tcx> TraitRef<'tcx> {
     pub fn new(def_id: DefId, substs: &'tcx Substs<'tcx>) -> TraitRef<'tcx> {
         TraitRef { def_id: def_id, substs: substs }
+    }
+
+    /// Returns a TraitRef of the form `P0: Foo<P1..Pn>` where `Pi`
+    /// are the parameters defined on trait.
+    pub fn identity<'a, 'gcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>, def_id: DefId) -> TraitRef<'tcx> {
+        TraitRef {
+            def_id,
+            substs: Substs::identity_for_item(tcx, def_id),
+        }
     }
 
     pub fn self_ty(&self) -> Ty<'tcx> {
@@ -851,11 +862,11 @@ impl<'a, 'tcx> ProjectionTy<'tcx> {
     /// Construct a ProjectionTy by searching the trait from trait_ref for the
     /// associated item named item_name.
     pub fn from_ref_and_name(
-        tcx: TyCtxt, trait_ref: ty::TraitRef<'tcx>, item_name: Name
+        tcx: TyCtxt, trait_ref: ty::TraitRef<'tcx>, item_name: Ident
     ) -> ProjectionTy<'tcx> {
         let item_def_id = tcx.associated_items(trait_ref.def_id).find(|item| {
             item.kind == ty::AssociatedKind::Type &&
-            tcx.hygienic_eq(item_name, item.name, trait_ref.def_id)
+            tcx.hygienic_eq(item_name, item.ident, trait_ref.def_id)
         }).unwrap().def_id;
 
         ProjectionTy {
@@ -989,11 +1000,11 @@ impl<'a, 'gcx, 'tcx> ParamTy {
 ///     for<'a> fn(for<'b> fn(&'b isize, &'a isize), &'a char)
 ///     ^          ^            |        |         |
 ///     |          |            |        |         |
-///     |          +------------+ 1      |         |
+///     |          +------------+ 0      |         |
 ///     |                                |         |
-///     +--------------------------------+ 2       |
+///     +--------------------------------+ 1       |
 ///     |                                          |
-///     +------------------------------------------+ 1
+///     +------------------------------------------+ 0
 ///
 /// In this type, there are two binders (the outer fn and the inner
 /// fn). We need to be able to determine, for any given region, which
@@ -1005,9 +1016,9 @@ impl<'a, 'gcx, 'tcx> ParamTy {
 ///
 /// Let's start with the reference type `&'b isize` that is the first
 /// argument to the inner function. This region `'b` is assigned a De
-/// Bruijn index of 1, meaning "the innermost binder" (in this case, a
+/// Bruijn index of 0, meaning "the innermost binder" (in this case, a
 /// fn). The region `'a` that appears in the second argument type (`&'a
-/// isize`) would then be assigned a De Bruijn index of 2, meaning "the
+/// isize`) would then be assigned a De Bruijn index of 1, meaning "the
 /// second-innermost binder". (These indices are written on the arrays
 /// in the diagram).
 ///
@@ -1017,16 +1028,15 @@ impl<'a, 'gcx, 'tcx> ParamTy {
 /// the outermost fn. But this time, this reference is not nested within
 /// any other binders (i.e., it is not an argument to the inner fn, but
 /// rather the outer one). Therefore, in this case, it is assigned a
-/// De Bruijn index of 1, because the innermost binder in that location
+/// De Bruijn index of 0, because the innermost binder in that location
 /// is the outer fn.
 ///
 /// [dbi]: http://en.wikipedia.org/wiki/De_Bruijn_index
-#[derive(Clone, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable, Debug, Copy, PartialOrd, Ord)]
-pub struct DebruijnIndex {
-    /// We maintain the invariant that this is never 0. So 1 indicates
-    /// the innermost binder. To ensure this, create with `DebruijnIndex::new`.
-    pub depth: u32,
-}
+newtype_index!(DebruijnIndex
+    {
+        DEBUG_FORMAT = "DebruijnIndex({})",
+        const INNERMOST = 0,
+    });
 
 pub type Region<'tcx> = &'tcx RegionKind;
 
@@ -1086,7 +1096,7 @@ pub type Region<'tcx> = &'tcx RegionKind;
 ///
 /// [1]: http://smallcultfollowing.com/babysteps/blog/2013/10/29/intermingled-parameter-lists/
 /// [2]: http://smallcultfollowing.com/babysteps/blog/2013/11/04/intermingled-parameter-lists/
-/// [rustc guide]: https://rust-lang-nursery.github.io/rustc-guide/trait-hrtb.html
+/// [rustc guide]: https://rust-lang-nursery.github.io/rustc-guide/traits/hrtb.html
 #[derive(Clone, PartialEq, Eq, Hash, Copy, RustcEncodable, RustcDecodable, PartialOrd, Ord)]
 pub enum RegionKind {
     // Region bound in a type or fn declaration which will be
@@ -1259,15 +1269,65 @@ impl<'a, 'tcx, 'gcx> PolyExistentialProjection<'tcx> {
 }
 
 impl DebruijnIndex {
-    pub fn new(depth: u32) -> DebruijnIndex {
-        assert!(depth > 0);
-        DebruijnIndex { depth: depth }
+    /// Returns the resulting index when this value is moved into
+    /// `amount` number of new binders. So e.g. if you had
+    ///
+    ///    for<'a> fn(&'a x)
+    ///
+    /// and you wanted to change to
+    ///
+    ///    for<'a> fn(for<'b> fn(&'a x))
+    ///
+    /// you would need to shift the index for `'a` into 1 new binder.
+    #[must_use]
+    pub const fn shifted_in(self, amount: u32) -> DebruijnIndex {
+        DebruijnIndex(self.0 + amount)
     }
 
-    pub fn shifted(&self, amount: u32) -> DebruijnIndex {
-        DebruijnIndex { depth: self.depth + amount }
+    /// Update this index in place by shifting it "in" through
+    /// `amount` number of binders.
+    pub fn shift_in(&mut self, amount: u32) {
+        *self = self.shifted_in(amount);
+    }
+
+    /// Returns the resulting index when this value is moved out from
+    /// `amount` number of new binders.
+    #[must_use]
+    pub const fn shifted_out(self, amount: u32) -> DebruijnIndex {
+        DebruijnIndex(self.0 - amount)
+    }
+
+    /// Update in place by shifting out from `amount` binders.
+    pub fn shift_out(&mut self, amount: u32) {
+        *self = self.shifted_out(amount);
+    }
+
+    /// Adjusts any Debruijn Indices so as to make `to_binder` the
+    /// innermost binder. That is, if we have something bound at `to_binder`,
+    /// it will now be bound at INNERMOST. This is an appropriate thing to do
+    /// when moving a region out from inside binders:
+    ///
+    /// ```
+    ///             for<'a>   fn(for<'b>   for<'c>   fn(&'a u32), _)
+    /// // Binder:  D3           D2        D1            ^^
+    /// ```
+    ///
+    /// Here, the region `'a` would have the debruijn index D3,
+    /// because it is the bound 3 binders out. However, if we wanted
+    /// to refer to that region `'a` in the second argument (the `_`),
+    /// those two binders would not be in scope. In that case, we
+    /// might invoke `shift_out_to_binder(D3)`. This would adjust the
+    /// debruijn index of `'a` to D1 (the innermost binder).
+    ///
+    /// If we invoke `shift_out_to_binder` and the region is in fact
+    /// bound by one of the binders we are shifting out of, that is an
+    /// error (and should fail an assertion failure).
+    pub fn shifted_out_to_binder(self, to_binder: DebruijnIndex) -> Self {
+        self.shifted_out((to_binder.0 - INNERMOST.0) as u32)
     }
 }
+
+impl_stable_hash_for!(tuple_struct DebruijnIndex { index });
 
 /// Region utilities
 impl RegionKind {
@@ -1278,19 +1338,39 @@ impl RegionKind {
         }
     }
 
-    pub fn escapes_depth(&self, depth: u32) -> bool {
+    pub fn bound_at_or_above_binder(&self, index: DebruijnIndex) -> bool {
         match *self {
-            ty::ReLateBound(debruijn, _) => debruijn.depth > depth,
+            ty::ReLateBound(debruijn, _) => debruijn >= index,
             _ => false,
         }
     }
 
-    /// Returns the depth of `self` from the (1-based) binding level `depth`
-    pub fn from_depth(&self, depth: u32) -> RegionKind {
+    /// Adjusts any Debruijn Indices so as to make `to_binder` the
+    /// innermost binder. That is, if we have something bound at `to_binder`,
+    /// it will now be bound at INNERMOST. This is an appropriate thing to do
+    /// when moving a region out from inside binders:
+    ///
+    /// ```
+    ///             for<'a>   fn(for<'b>   for<'c>   fn(&'a u32), _)
+    /// // Binder:  D3           D2        D1            ^^
+    /// ```
+    ///
+    /// Here, the region `'a` would have the debruijn index D3,
+    /// because it is the bound 3 binders out. However, if we wanted
+    /// to refer to that region `'a` in the second argument (the `_`),
+    /// those two binders would not be in scope. In that case, we
+    /// might invoke `shift_out_to_binder(D3)`. This would adjust the
+    /// debruijn index of `'a` to D1 (the innermost binder).
+    ///
+    /// If we invoke `shift_out_to_binder` and the region is in fact
+    /// bound by one of the binders we are shifting out of, that is an
+    /// error (and should fail an assertion failure).
+    pub fn shifted_out_to_binder(&self, to_binder: ty::DebruijnIndex) -> RegionKind {
         match *self {
-            ty::ReLateBound(debruijn, r) => ty::ReLateBound(DebruijnIndex {
-                depth: debruijn.depth - (depth - 1)
-            }, r),
+            ty::ReLateBound(debruijn, r) => ty::ReLateBound(
+                debruijn.shifted_out_to_binder(to_binder),
+                r,
+            ),
             r => r
         }
     }
@@ -1680,6 +1760,13 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
         }
     }
 
+    pub fn is_impl_trait(&self) -> bool {
+        match self.sty {
+            TyAnon(..) => true,
+            _ => false,
+        }
+    }
+
     pub fn ty_to_def_id(&self) -> Option<DefId> {
         match self.sty {
             TyDynamic(ref tt, ..) => tt.principal().map(|p| p.def_id()),
@@ -1781,7 +1868,7 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
 pub struct Const<'tcx> {
     pub ty: Ty<'tcx>,
 
-    pub val: ConstVal<'tcx>,
+    pub val: ConstValue<'tcx>,
 }
 
 impl<'tcx> Const<'tcx> {
@@ -1792,19 +1879,7 @@ impl<'tcx> Const<'tcx> {
         ty: Ty<'tcx>,
     ) -> &'tcx Self {
         tcx.mk_const(Const {
-            val: ConstVal::Unevaluated(def_id, substs),
-            ty,
-        })
-    }
-
-    #[inline]
-    pub fn from_const_val(
-        tcx: TyCtxt<'_, '_, 'tcx>,
-        val: ConstVal<'tcx>,
-        ty: Ty<'tcx>,
-    ) -> &'tcx Self {
-        tcx.mk_const(Const {
-            val,
+            val: ConstValue::Unevaluated(def_id, substs),
             ty,
         })
     }
@@ -1815,7 +1890,10 @@ impl<'tcx> Const<'tcx> {
         val: ConstValue<'tcx>,
         ty: Ty<'tcx>,
     ) -> &'tcx Self {
-        Self::from_const_val(tcx, ConstVal::Value(val), ty)
+        tcx.mk_const(Const {
+            val,
+            ty,
+        })
     }
 
     #[inline]
@@ -1878,34 +1956,22 @@ impl<'tcx> Const<'tcx> {
         }
         let ty = tcx.lift_to_global(&ty).unwrap();
         let size = tcx.layout_of(ty).ok()?.size;
-        match self.val {
-            ConstVal::Value(val) => val.to_bits(size),
-            _ => None,
-        }
+        self.val.to_bits(size)
     }
 
     #[inline]
     pub fn to_ptr(&self) -> Option<Pointer> {
-        match self.val {
-            ConstVal::Value(val) => val.to_ptr(),
-            _ => None,
-        }
+        self.val.to_ptr()
     }
 
     #[inline]
     pub fn to_byval_value(&self) -> Option<Value> {
-        match self.val {
-            ConstVal::Value(val) => val.to_byval_value(),
-            _ => None,
-        }
+        self.val.to_byval_value()
     }
 
     #[inline]
     pub fn to_scalar(&self) -> Option<Scalar> {
-        match self.val {
-            ConstVal::Value(val) => val.to_scalar(),
-            _ => None,
-        }
+        self.val.to_scalar()
     }
 
     #[inline]
@@ -1917,10 +1983,7 @@ impl<'tcx> Const<'tcx> {
         assert_eq!(self.ty, ty.value);
         let ty = tcx.lift_to_global(&ty).unwrap();
         let size = tcx.layout_of(ty).ok()?.size;
-        match self.val {
-            ConstVal::Value(val) => val.to_bits(size),
-            _ => None,
-        }
+        self.val.to_bits(size)
     }
 
     #[inline]

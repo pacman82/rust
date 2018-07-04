@@ -313,12 +313,13 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
         debug!("consume_body(body={:?})", body);
 
         for arg in &body.arguments {
-            let arg_ty = return_if_err!(self.mc.node_ty(arg.pat.hir_id));
+            let arg_ty = return_if_err!(self.mc.pat_ty_adjusted(&arg.pat));
+            debug!("consume_body: arg_ty = {:?}", arg_ty);
 
             let fn_body_scope_r =
                 self.tcx().mk_region(ty::ReScope(region::Scope::Node(body.value.hir_id.local_id)));
             let arg_cmt = Rc::new(self.mc.cat_rvalue(
-                arg.id,
+                arg.hir_id,
                 arg.pat.span,
                 fn_body_scope_r, // Args live only as long as the fn body.
                 arg_ty));
@@ -478,7 +479,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
                 self.consume_exprs(inputs);
             }
 
-            hir::ExprAgain(..) |
+            hir::ExprContinue(..) |
             hir::ExprLit(..) => {}
 
             hir::ExprLoop(ref blk, _, _) => {
@@ -608,9 +609,9 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
     fn walk_local(&mut self, local: &hir::Local) {
         match local.init {
             None => {
-                let delegate = &mut self.delegate;
-                local.pat.each_binding(|_, id, span, _| {
-                    delegate.decl_without_init(id, span);
+                local.pat.each_binding(|_, hir_id, span, _| {
+                    let node_id = self.mc.tcx.hir.hir_to_node_id(hir_id);
+                    self.delegate.decl_without_init(node_id, span);
                 })
             }
 
@@ -837,22 +838,29 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
     /// established up front, e.g. via `determine_pat_move_mode` (see
     /// also `walk_irrefutable_pat` for patterns that stand alone).
     fn walk_pat(&mut self, cmt_discr: mc::cmt<'tcx>, pat: &hir::Pat, match_mode: MatchMode) {
-        debug!("walk_pat cmt_discr={:?} pat={:?}", cmt_discr, pat);
+        debug!("walk_pat(cmt_discr={:?}, pat={:?})", cmt_discr, pat);
 
         let ExprUseVisitor { ref mc, ref mut delegate, param_env } = *self;
         return_if_err!(mc.cat_pattern(cmt_discr.clone(), pat, |cmt_pat, pat| {
             if let PatKind::Binding(_, canonical_id, ..) = pat.node {
-                debug!("binding cmt_pat={:?} pat={:?} match_mode={:?}", cmt_pat, pat, match_mode);
+                debug!(
+                    "walk_pat: binding cmt_pat={:?} pat={:?} match_mode={:?}",
+                    cmt_pat,
+                    pat,
+                    match_mode,
+                );
                 let bm = *mc.tables.pat_binding_modes().get(pat.hir_id)
                                                      .expect("missing binding mode");
+                debug!("walk_pat: pat.hir_id={:?} bm={:?}", pat.hir_id, bm);
 
                 // pat_ty: the type of the binding being produced.
                 let pat_ty = return_if_err!(mc.node_ty(pat.hir_id));
+                debug!("walk_pat: pat_ty={:?}", pat_ty);
 
                 // Each match binding is effectively an assignment to the
                 // binding being produced.
                 let def = Def::Local(canonical_id);
-                if let Ok(ref binding_cmt) = mc.cat_def(pat.id, pat.span, pat_ty, def) {
+                if let Ok(ref binding_cmt) = mc.cat_def(pat.hir_id, pat.span, pat_ty, def) {
                     delegate.mutate(pat.id, pat.span, binding_cmt, MutateMode::Init);
                 }
 
@@ -915,7 +923,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
                     closure_expr_id: closure_def_id.to_local(),
                 };
                 let upvar_capture = self.mc.tables.upvar_capture(upvar_id);
-                let cmt_var = return_if_err!(self.cat_captured_var(closure_expr.id,
+                let cmt_var = return_if_err!(self.cat_captured_var(closure_expr.hir_id,
                                                                    fn_decl_span,
                                                                    freevar));
                 match upvar_capture {
@@ -940,7 +948,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
     }
 
     fn cat_captured_var(&mut self,
-                        closure_id: ast::NodeId,
+                        closure_hir_id: hir::HirId,
                         closure_span: Span,
                         upvar: &hir::Freevar)
                         -> mc::McResult<mc::cmt_<'tcx>> {
@@ -948,7 +956,7 @@ impl<'a, 'gcx, 'tcx> ExprUseVisitor<'a, 'gcx, 'tcx> {
         // caller's perspective
         let var_hir_id = self.tcx().hir.node_to_hir_id(upvar.var_id());
         let var_ty = self.mc.node_ty(var_hir_id)?;
-        self.mc.cat_def(closure_id, closure_span, var_ty, upvar.def)
+        self.mc.cat_def(closure_hir_id, closure_span, var_ty, upvar.def)
     }
 }
 

@@ -4,7 +4,7 @@ use rustc::ty::layout::LayoutOf;
 use syntax::codemap::Span;
 use rustc_target::spec::abi::Abi;
 
-use rustc::mir::interpret::{EvalResult, Scalar, Value};
+use rustc::mir::interpret::EvalResult;
 use super::{EvalContext, Place, Machine, ValTy};
 
 use rustc_data_structures::indexed_vec::Idx;
@@ -39,12 +39,15 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
             } => {
                 let discr_val = self.eval_operand(discr)?;
                 let discr_prim = self.value_to_scalar(discr_val)?;
+                let discr_layout = self.layout_of(discr_val.ty).unwrap();
+                trace!("SwitchInt({:?}, {:#?})", discr_prim, discr_layout);
+                let discr_prim = discr_prim.to_bits(discr_layout.size)?;
 
                 // Branch to the `otherwise` case by default, if no match is found.
                 let mut target_block = targets[targets.len() - 1];
 
                 for (index, &const_int) in values.iter().enumerate() {
-                    if discr_prim.to_bits(self.layout_of(discr_val.ty).unwrap().size)? == const_int {
+                    if discr_prim == const_int {
                         target_block = targets[index];
                         break;
                     }
@@ -288,10 +291,10 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
                     // and need to pack arguments
                     Abi::Rust => {
                         trace!(
-                            "arg_locals: {:?}",
+                            "arg_locals: {:#?}",
                             self.frame().mir.args_iter().collect::<Vec<_>>()
                         );
-                        trace!("args: {:?}", args);
+                        trace!("args: {:#?}", args);
                         let local = arg_locals.nth(1).unwrap();
                         for (i, &valty) in args.into_iter().enumerate() {
                             let dest = self.eval_place(&mir::Place::Local(local).field(
@@ -318,10 +321,10 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
                 let mut arg_locals = self.frame().mir.args_iter();
                 trace!("ABI: {:?}", sig.abi);
                 trace!(
-                    "arg_locals: {:?}",
+                    "arg_locals: {:#?}",
                     self.frame().mir.args_iter().collect::<Vec<_>>()
                 );
-                trace!("args: {:?}", args);
+                trace!("args: {:#?}", args);
                 match sig.abi {
                     Abi::RustCall => {
                         assert_eq!(args.len(), 2);
@@ -335,53 +338,17 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
 
                         // unpack and write all other args
                         let layout = self.layout_of(args[1].ty)?;
-                        if let ty::TyTuple(..) = args[1].ty.sty {
+                        if let ty::TyTuple(_) = args[1].ty.sty {
+                            if layout.is_zst() {
+                                // Nothing to do, no need to unpack zsts
+                                return Ok(());
+                            }
                             if self.frame().mir.args_iter().count() == layout.fields.count() + 1 {
-                                match args[1].value {
-                                    Value::ByRef(ptr, align) => {
-                                        for (i, arg_local) in arg_locals.enumerate() {
-                                            let field = layout.field(&self, i)?;
-                                            let offset = layout.fields.offset(i);
-                                            let arg = Value::ByRef(ptr.ptr_offset(offset, &self)?,
-                                                                   align.min(field.align));
-                                            let dest =
-                                                self.eval_place(&mir::Place::Local(arg_local))?;
-                                            trace!(
-                                                "writing arg {:?} to {:?} (type: {})",
-                                                arg,
-                                                dest,
-                                                field.ty
-                                            );
-                                            let valty = ValTy {
-                                                value: arg,
-                                                ty: field.ty,
-                                            };
-                                            self.write_value(valty, dest)?;
-                                        }
-                                    }
-                                    Value::Scalar(Scalar::Bits { defined: 0, .. }) => {}
-                                    other => {
-                                        trace!("{:#?}, {:#?}", other, layout);
-                                        let mut layout = layout;
-                                        'outer: loop {
-                                            for i in 0..layout.fields.count() {
-                                                let field = layout.field(&self, i)?;
-                                                if layout.fields.offset(i).bytes() == 0 && layout.size == field.size {
-                                                    layout = field;
-                                                    continue 'outer;
-                                                }
-                                            }
-                                            break;
-                                        }
-                                        let dest = self.eval_place(&mir::Place::Local(
-                                            arg_locals.next().unwrap(),
-                                        ))?;
-                                        let valty = ValTy {
-                                            value: other,
-                                            ty: layout.ty,
-                                        };
-                                        self.write_value(valty, dest)?;
-                                    }
+                                for (i, arg_local) in arg_locals.enumerate() {
+                                    let field = mir::Field::new(i);
+                                    let valty = self.read_field(args[1].value, None, field, args[1].ty)?;
+                                    let dest = self.eval_place(&mir::Place::Local(arg_local))?;
+                                    self.write_value(valty, dest)?;
                                 }
                             } else {
                                 trace!("manual impl of rust-call ABI");

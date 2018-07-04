@@ -28,10 +28,10 @@ use super::util;
 use hir::def_id::DefId;
 use infer::{InferCtxt, InferOk};
 use infer::type_variable::TypeVariableOrigin;
-use middle::const_val::ConstVal;
+use mir::interpret::ConstValue;
 use mir::interpret::{GlobalId};
 use rustc_data_structures::snapshot_map::{Snapshot, SnapshotMap};
-use syntax::symbol::Symbol;
+use syntax::ast::Ident;
 use ty::subst::{Subst, Substs};
 use ty::{self, ToPredicate, ToPolyTraitRef, Ty, TyCtxt};
 use ty::fold::{TypeFoldable, TypeFolder};
@@ -137,17 +137,30 @@ impl<'tcx> ProjectionTyCandidateSet<'tcx> {
     fn push_candidate(&mut self, candidate: ProjectionTyCandidate<'tcx>) -> bool {
         use self::ProjectionTyCandidateSet::*;
         use self::ProjectionTyCandidate::*;
+
+        // This wacky variable is just used to try and
+        // make code readable and avoid confusing paths.
+        // It is assigned a "value" of `()` only on those
+        // paths in which we wish to convert `*self` to
+        // ambiguous (and return false, because the candidate
+        // was not used). On other paths, it is not assigned,
+        // and hence if those paths *could* reach the code that
+        // comes after the match, this fn would not compile.
+        let convert_to_ambiguous;
+
         match self {
             None => {
                 *self = Single(candidate);
-                true
+                return true;
             }
+
             Single(current) => {
                 // Duplicates can happen inside ParamEnv. In the case, we
                 // perform a lazy deduplication.
                 if current == &candidate {
                     return false;
                 }
+
                 // Prefer where-clauses. As in select, if there are multiple
                 // candidates, we prefer where-clause candidates over impls.  This
                 // may seem a bit surprising, since impls are the source of
@@ -156,17 +169,23 @@ impl<'tcx> ProjectionTyCandidateSet<'tcx> {
                 // clauses are the safer choice. See the comment on
                 // `select::SelectionCandidate` and #21974 for more details.
                 match (current, candidate) {
-                    (ParamEnv(..), ParamEnv(..)) => { *self = Ambiguous; }
-                    (ParamEnv(..), _) => {}
+                    (ParamEnv(..), ParamEnv(..)) => convert_to_ambiguous = (),
+                    (ParamEnv(..), _) => return false,
                     (_, ParamEnv(..)) => { unreachable!(); }
-                    (_, _) => { *self = Ambiguous; }
+                    (_, _) => convert_to_ambiguous = (),
                 }
-                false
             }
+
             Ambiguous | Error(..) => {
-                false
+                return false;
             }
         }
+
+        // We only ever get here when we moved from a single candidate
+        // to ambiguous.
+        let () = convert_to_ambiguous;
+        *self = Ambiguous;
+        false
     }
 }
 
@@ -407,7 +426,7 @@ impl<'a, 'b, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for AssociatedTypeNormalizer<'a,
     }
 
     fn fold_const(&mut self, constant: &'tcx ty::Const<'tcx>) -> &'tcx ty::Const<'tcx> {
-        if let ConstVal::Unevaluated(def_id, substs) = constant.val {
+        if let ConstValue::Unevaluated(def_id, substs) = constant.val {
             let tcx = self.selcx.tcx().global_tcx();
             if let Some(param_env) = self.tcx().lift_to_global(&self.param_env) {
                 if substs.needs_infer() || substs.has_skol() {
@@ -1330,10 +1349,10 @@ fn confirm_generator_candidate<'cx, 'gcx, 'tcx>(
                                             obligation.predicate.self_ty(),
                                             gen_sig)
         .map_bound(|(trait_ref, yield_ty, return_ty)| {
-            let name = tcx.associated_item(obligation.predicate.item_def_id).name;
-            let ty = if name == Symbol::intern("Return") {
+            let name = tcx.associated_item(obligation.predicate.item_def_id).ident.name;
+            let ty = if name == "Return" {
                 return_ty
-            } else if name == Symbol::intern("Yield") {
+            } else if name == "Yield" {
                 yield_ty
             } else {
                 bug!()
@@ -1433,7 +1452,7 @@ fn confirm_callable_candidate<'cx, 'gcx, 'tcx>(
                 projection_ty: ty::ProjectionTy::from_ref_and_name(
                     tcx,
                     trait_ref,
-                    Symbol::intern(FN_OUTPUT_NAME),
+                    Ident::from_str(FN_OUTPUT_NAME),
                 ),
                 ty: ret_type
             }
@@ -1489,7 +1508,7 @@ fn confirm_impl_candidate<'cx, 'gcx, 'tcx>(
         // checker method `check_impl_items_against_trait`, so here we
         // just return TyError.
         debug!("confirm_impl_candidate: no associated type {:?} for {:?}",
-               assoc_ty.item.name,
+               assoc_ty.item.ident,
                obligation.predicate);
         tcx.types.err
     } else {
@@ -1514,7 +1533,7 @@ fn assoc_ty_def<'cx, 'gcx, 'tcx>(
     -> specialization_graph::NodeItem<ty::AssociatedItem>
 {
     let tcx = selcx.tcx();
-    let assoc_ty_name = tcx.associated_item(assoc_ty_def_id).name;
+    let assoc_ty_name = tcx.associated_item(assoc_ty_def_id).ident;
     let trait_def_id = tcx.impl_trait_ref(impl_def_id).unwrap().def_id;
     let trait_def = tcx.trait_def(trait_def_id);
 
@@ -1527,7 +1546,7 @@ fn assoc_ty_def<'cx, 'gcx, 'tcx>(
     let impl_node = specialization_graph::Node::Impl(impl_def_id);
     for item in impl_node.items(tcx) {
         if item.kind == ty::AssociatedKind::Type &&
-                tcx.hygienic_eq(item.name, assoc_ty_name, trait_def_id) {
+                tcx.hygienic_eq(item.ident, assoc_ty_name, trait_def_id) {
             return specialization_graph::NodeItem {
                 node: specialization_graph::Node::Impl(impl_def_id),
                 item,

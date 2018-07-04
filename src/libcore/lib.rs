@@ -41,7 +41,7 @@
 //!   dictate the panic message, the file at which panic was invoked, and the
 //!   line and column inside the file. It is up to consumers of this core
 //!   library to define this panic function; it is only required to never
-//!   return. This requires a `lang` attribute named `panic_fmt`.
+//!   return. This requires a `lang` attribute named `panic_impl`.
 //!
 //! * `rust_eh_personality` - is used by the failure mechanisms of the
 //!    compiler. This is often mapped to GCC's personality function, but crates
@@ -81,6 +81,7 @@
 #![feature(cfg_target_has_atomic)]
 #![feature(concat_idents)]
 #![feature(const_fn)]
+#![feature(const_int_ops)]
 #![feature(core_float)]
 #![feature(custom_attribute)]
 #![feature(doc_cfg)]
@@ -88,8 +89,6 @@
 #![feature(extern_types)]
 #![feature(fundamental)]
 #![feature(intrinsics)]
-#![feature(iterator_flatten)]
-#![feature(iterator_repeat_with)]
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
 #![feature(never_type)]
@@ -206,16 +205,13 @@ pub mod time;
 
 pub mod unicode;
 
+/* Async */
+pub mod future;
+pub mod task;
+
 /* Heap memory allocator trait */
 #[allow(missing_docs)]
 pub mod alloc;
-
-#[unstable(feature = "allocator_api", issue = "32838")]
-#[rustc_deprecated(since = "1.27.0", reason = "module renamed to `alloc`")]
-/// Use the `alloc` module instead.
-pub mod heap {
-    pub use alloc::*;
-}
 
 // note: does not need to be public
 mod iter_private;

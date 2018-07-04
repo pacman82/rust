@@ -28,7 +28,7 @@ use {CodegenResults, CrateInfo};
 use rustc::util::common::time;
 use rustc::util::fs::fix_windows_verbatim_for_gcc;
 use rustc::hir::def_id::CrateNum;
-use tempdir::TempDir;
+use tempfile::{Builder as TempFileBuilder, TempDir};
 use rustc_target::spec::{PanicStrategy, RelroLevel, LinkerFlavor, TargetTriple};
 use rustc_data_structures::fx::FxHashSet;
 use context::get_reloc_model;
@@ -321,7 +321,10 @@ fn link_binary_output(sess: &Session,
         // final destination, with a `fs::rename` call. In order for the rename to
         // always succeed, the temporary file needs to be on the same filesystem,
         // which is why we create it inside the output directory specifically.
-        let metadata_tmpdir = match TempDir::new_in(out_filename.parent().unwrap(), "rmeta") {
+        let metadata_tmpdir = match TempFileBuilder::new()
+            .prefix("rmeta")
+            .tempdir_in(out_filename.parent().unwrap())
+        {
             Ok(tmpdir) => tmpdir,
             Err(err) => sess.fatal(&format!("couldn't create a temp dir: {}", err)),
         };
@@ -332,7 +335,7 @@ fn link_binary_output(sess: &Session,
         out_filenames.push(out_filename);
     }
 
-    let tmpdir = match TempDir::new("rustc") {
+    let tmpdir = match TempFileBuilder::new().prefix("rustc").tempdir() {
         Ok(tmpdir) => tmpdir,
         Err(err) => sess.fatal(&format!("couldn't create a temp dir: {}", err)),
     };
@@ -625,6 +628,11 @@ fn link_natively(sess: &Session,
     if let Some(args) = sess.target.target.options.pre_link_args.get(&flavor) {
         cmd.args(args);
     }
+    if let Some(args) = sess.target.target.options.pre_link_args_crt.get(&flavor) {
+        if sess.crt_static() {
+            cmd.args(args);
+        }
+    }
     if let Some(ref args) = sess.opts.debugging_opts.pre_link_args {
         cmd.args(args);
     }
@@ -637,6 +645,12 @@ fn link_natively(sess: &Session,
     };
     for obj in pre_link_objects {
         cmd.arg(root.join(obj));
+    }
+
+    if crate_type == config::CrateTypeExecutable && sess.crt_static() {
+        for obj in &sess.target.target.options.pre_link_objects_exe_crt {
+            cmd.arg(root.join(obj));
+        }
     }
 
     if sess.target.target.options.is_like_emscripten {
@@ -659,6 +673,11 @@ fn link_natively(sess: &Session,
     }
     for obj in &sess.target.target.options.post_link_objects {
         cmd.arg(root.join(obj));
+    }
+    if sess.crt_static() {
+        for obj in &sess.target.target.options.post_link_objects_crt {
+            cmd.arg(root.join(obj));
+        }
     }
     if let Some(args) = sess.target.target.options.post_link_args.get(&flavor) {
         cmd.args(args);

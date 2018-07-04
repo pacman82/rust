@@ -11,7 +11,7 @@
 use cmp::Ordering;
 use ops::Try;
 
-use super::{AlwaysOk, LoopState};
+use super::LoopState;
 use super::{Chain, Cycle, Cloned, Enumerate, Filter, FilterMap, Fuse};
 use super::{Flatten, FlatMap, flatten_compat};
 use super::{Inspect, Map, Peekable, Scan, Skip, SkipWhile, StepBy, Take, TakeWhile, Rev};
@@ -283,7 +283,6 @@ pub trait Iterator {
     /// Basic usage:
     ///
     /// ```
-    /// #![feature(iterator_step_by)]
     /// let a = [0, 1, 2, 3, 4, 5];
     /// let mut iter = a.into_iter().step_by(2);
     ///
@@ -293,9 +292,7 @@ pub trait Iterator {
     /// assert_eq!(iter.next(), None);
     /// ```
     #[inline]
-    #[unstable(feature = "iterator_step_by",
-               reason = "unstable replacement of Range::step_by",
-               issue = "27741")]
+    #[stable(feature = "iterator_step_by", since = "1.28.0")]
     fn step_by(self, step: usize) -> StepBy<Self> where Self: Sized {
         assert!(step != 0);
         StepBy{iter: self, step: step - 1, first_take: true}
@@ -1039,8 +1036,6 @@ pub trait Iterator {
     /// Basic usage:
     ///
     /// ```
-    /// #![feature(iterator_flatten)]
-    ///
     /// let data = vec![vec![1, 2, 3, 4], vec![5, 6]];
     /// let flattened = data.into_iter().flatten().collect::<Vec<u8>>();
     /// assert_eq!(flattened, &[1, 2, 3, 4, 5, 6]);
@@ -1049,8 +1044,6 @@ pub trait Iterator {
     /// Mapping and then flattening:
     ///
     /// ```
-    /// #![feature(iterator_flatten)]
-    ///
     /// let words = ["alpha", "beta", "gamma"];
     ///
     /// // chars() returns an iterator
@@ -1077,8 +1070,6 @@ pub trait Iterator {
     /// Flattening once only removes one level of nesting:
     ///
     /// ```
-    /// #![feature(iterator_flatten)]
-    ///
     /// let d3 = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]];
     ///
     /// let d2 = d3.iter().flatten().collect::<Vec<_>>();
@@ -1096,7 +1087,7 @@ pub trait Iterator {
     ///
     /// [`flat_map()`]: #method.flat_map
     #[inline]
-    #[unstable(feature = "iterator_flatten", issue = "48213")]
+    #[stable(feature = "iterator_flatten", since = "1.29")]
     fn flatten(self) -> Flatten<Self>
     where Self: Sized, Self::Item: IntoIterator {
         Flatten { inner: flatten_compat(self) }
@@ -1169,8 +1160,9 @@ pub trait Iterator {
     /// happening at various parts in the pipeline. To do that, insert
     /// a call to `inspect()`.
     ///
-    /// It's much more common for `inspect()` to be used as a debugging tool
-    /// than to exist in your final code, but never say never.
+    /// It's more common for `inspect()` to be used as a debugging tool than to
+    /// exist in your final code, but applications may find it useful in certain
+    /// situations when errors need to be logged before being discarded.
     ///
     /// # Examples
     ///
@@ -1209,6 +1201,32 @@ pub trait Iterator {
     /// made it through filter: 2
     /// about to filter: 3
     /// 6
+    /// ```
+    ///
+    /// Logging errors before discarding them:
+    ///
+    /// ```
+    /// let lines = ["1", "2", "a"];
+    ///
+    /// let sum: i32 = lines
+    ///     .iter()
+    ///     .map(|line| line.parse::<i32>())
+    ///     .inspect(|num| {
+    ///         if let Err(ref e) = *num {
+    ///             println!("Parsing error: {}", e);
+    ///         }
+    ///     })
+    ///     .filter_map(Result::ok)
+    ///     .sum();
+    ///
+    /// println!("Sum: {}", sum);
+    /// ```
+    ///
+    /// This will print:
+    ///
+    /// ```text
+    /// Parsing error: invalid digit found in string
+    /// Sum: 3
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -1590,7 +1608,7 @@ pub trait Iterator {
     fn fold<B, F>(mut self, init: B, mut f: F) -> B where
         Self: Sized, F: FnMut(B, Self::Item) -> B,
     {
-        self.try_fold(init, move |acc, x| AlwaysOk(f(acc, x))).0
+        self.try_fold(init, move |acc, x| Ok::<B, !>(f(acc, x))).unwrap()
     }
 
     /// Tests if every element of the iterator matches a predicate.

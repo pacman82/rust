@@ -65,7 +65,7 @@ impl<'a, 'gcx, 'tcx> InteriorVisitor<'a, 'gcx, 'tcx> {
                    expr, scope, ty, self.expr_count, yield_span);
 
             if self.fcx.any_unresolved_type_vars(&ty) {
-                let mut err = struct_span_err!(self.fcx.tcx.sess, source_span, E0907,
+                let mut err = struct_span_err!(self.fcx.tcx.sess, source_span, E0698,
                     "type inside generator must be known in this context");
                 err.span_note(yield_span,
                               "the type is part of the generator because of this `yield`");
@@ -125,8 +125,7 @@ pub fn resolve_interior<'a, 'gcx, 'tcx>(fcx: &'a FnCtxt<'a, 'gcx, 'tcx>,
     let mut counter = 0;
     let type_list = fcx.tcx.fold_regions(&type_list, &mut false, |_, current_depth| {
         counter += 1;
-        fcx.tcx.mk_region(ty::ReLateBound(ty::DebruijnIndex::new(current_depth),
-                                        ty::BrAnon(counter)))
+        fcx.tcx.mk_region(ty::ReLateBound(current_depth, ty::BrAnon(counter)))
     });
 
     let witness = fcx.tcx.mk_generator_witness(ty::Binder::bind(type_list));

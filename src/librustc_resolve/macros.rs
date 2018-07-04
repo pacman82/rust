@@ -23,8 +23,8 @@ use syntax::attr::{self, HasAttrs};
 use syntax::errors::DiagnosticBuilder;
 use syntax::ext::base::{self, Annotatable, Determinacy, MultiModifier, MultiDecorator};
 use syntax::ext::base::{MacroKind, SyntaxExtension, Resolver as SyntaxResolver};
-use syntax::ext::expand::{Expansion, ExpansionKind, Invocation, InvocationKind, find_attr_invoc};
-use syntax::ext::hygiene::{self, Mark, MarkKind};
+use syntax::ext::expand::{self, AstFragment, AstFragmentKind, Invocation, InvocationKind};
+use syntax::ext::hygiene::{self, Mark, Transparency};
 use syntax::ext::placeholders::placeholder;
 use syntax::ext::tt::macro_rules;
 use syntax::feature_gate::{self, emit_feature_err, GateIssue};
@@ -107,6 +107,14 @@ impl<'a> MacroBinding<'a> {
             MacroBinding::Legacy(_) => panic!("unexpected MacroBinding::Legacy"),
         }
     }
+
+    pub fn def_ignoring_ambiguity(self) -> Def {
+        match self {
+            MacroBinding::Legacy(binding) => Def::Macro(binding.def_id, MacroKind::Bang),
+            MacroBinding::Global(binding) | MacroBinding::Modern(binding) =>
+                binding.def_ignoring_ambiguity(),
+        }
+    }
 }
 
 impl<'a> base::Resolver for Resolver<'a> {
@@ -130,11 +138,26 @@ impl<'a> base::Resolver for Resolver<'a> {
         struct EliminateCrateVar<'b, 'a: 'b>(&'b mut Resolver<'a>, Span);
 
         impl<'a, 'b> Folder for EliminateCrateVar<'a, 'b> {
-            fn fold_path(&mut self, mut path: ast::Path) -> ast::Path {
-                let ident = path.segments[0].ident;
-                if ident.name == keywords::DollarCrate.name() {
+            fn fold_path(&mut self, path: ast::Path) -> ast::Path {
+                match self.fold_qpath(None, path) {
+                    (None, path) => path,
+                    _ => unreachable!(),
+                }
+            }
+
+            fn fold_qpath(&mut self, mut qself: Option<ast::QSelf>, mut path: ast::Path)
+                          -> (Option<ast::QSelf>, ast::Path) {
+                qself = qself.map(|ast::QSelf { ty, path_span, position }| {
+                    ast::QSelf {
+                        ty: self.fold_ty(ty),
+                        path_span: self.new_span(path_span),
+                        position,
+                    }
+                });
+
+                if path.segments[0].ident.name == keywords::DollarCrate.name() {
+                    let module = self.0.resolve_crate_root(path.segments[0].ident);
                     path.segments[0].ident.name = keywords::CrateRoot.name();
-                    let module = self.0.resolve_crate_root(ident.span.ctxt(), true);
                     if !module.is_local() {
                         let span = path.segments[0].ident.span;
                         path.segments.insert(1, match module.kind {
@@ -142,10 +165,13 @@ impl<'a> base::Resolver for Resolver<'a> {
                                 ast::Ident::with_empty_ctxt(name).with_span_pos(span)
                             ),
                             _ => unreachable!(),
-                        })
+                        });
+                        if let Some(qself) = &mut qself {
+                            qself.position += 1;
+                        }
                     }
                 }
-                path
+                (qself, path)
             }
 
             fn fold_mac(&mut self, mac: ast::Mac) -> ast::Mac {
@@ -160,9 +186,10 @@ impl<'a> base::Resolver for Resolver<'a> {
         self.whitelisted_legacy_custom_derives.contains(&name)
     }
 
-    fn visit_expansion(&mut self, mark: Mark, expansion: &Expansion, derives: &[Mark]) {
+    fn visit_ast_fragment_with_placeholders(&mut self, mark: Mark, fragment: &AstFragment,
+                                            derives: &[Mark]) {
         let invocation = self.invocations[&mark];
-        self.collect_def_ids(mark, invocation, expansion);
+        self.collect_def_ids(mark, invocation, fragment);
 
         self.current_module = invocation.module.get();
         self.current_module.unresolved_invocations.borrow_mut().remove(&mark);
@@ -175,7 +202,7 @@ impl<'a> base::Resolver for Resolver<'a> {
             legacy_scope: LegacyScope::Invocation(invocation),
             expansion: mark,
         };
-        expansion.visit_with(&mut visitor);
+        fragment.visit_with(&mut visitor);
         invocation.expansion.set(visitor.legacy_scope);
     }
 
@@ -299,14 +326,17 @@ impl<'a> base::Resolver for Resolver<'a> {
         self.macro_defs.insert(invoc.expansion_data.mark, def_id);
         let normal_module_def_id =
             self.macro_def_scope(invoc.expansion_data.mark).normal_ancestor_id;
-        self.definitions.add_macro_def_scope(invoc.expansion_data.mark, normal_module_def_id);
+        self.definitions.add_parent_module_of_macro_def(invoc.expansion_data.mark,
+                                                        normal_module_def_id);
 
         self.unused_macros.remove(&def_id);
         let ext = self.get_macro(def);
         if ext.is_modern() {
-            invoc.expansion_data.mark.set_kind(MarkKind::Modern);
+            let transparency =
+                if ext.is_transparent() { Transparency::Transparent } else { Transparency::Opaque };
+            invoc.expansion_data.mark.set_transparency(transparency);
         } else if def_id.krate == BUILTIN_MACROS_CRATE {
-            invoc.expansion_data.mark.set_kind(MarkKind::Builtin);
+            invoc.expansion_data.mark.set_is_builtin(true);
         }
         Ok(Some(ext))
     }
@@ -322,8 +352,8 @@ impl<'a> base::Resolver for Resolver<'a> {
     fn check_unused_macros(&self) {
         for did in self.unused_macros.iter() {
             let id_span = match *self.macro_map[did] {
-                SyntaxExtension::NormalTT { def_info, .. } => def_info,
-                SyntaxExtension::DeclMacro(.., osp, _) => osp,
+                SyntaxExtension::NormalTT { def_info, .. } |
+                SyntaxExtension::DeclMacro { def_info, .. } => def_info,
                 _ => None,
             };
             if let Some((id, span)) = id_span {
@@ -369,14 +399,14 @@ impl<'a> Resolver<'a> {
                 Ok(ext) => if let SyntaxExtension::ProcMacroDerive(_, ref inert_attrs, _) = *ext {
                     if inert_attrs.contains(&attr_name) {
                         // FIXME(jseyfried) Avoid `mem::replace` here.
-                        let dummy_item = placeholder(ExpansionKind::Items, ast::DUMMY_NODE_ID)
+                        let dummy_item = placeholder(AstFragmentKind::Items, ast::DUMMY_NODE_ID)
                             .make_items().pop().unwrap();
                         let dummy_item = Annotatable::Item(dummy_item);
                         *item = mem::replace(item, dummy_item).map_attrs(|mut attrs| {
                             let inert_attr = attr.take().unwrap();
                             attr::mark_known(&inert_attr);
                             if self.proc_macro_enabled {
-                                *attr = find_attr_invoc(&mut attrs);
+                                *attr = expand::find_attr_invoc(&mut attrs);
                             }
                             attrs.push(inert_attr);
                             attrs
@@ -410,8 +440,8 @@ impl<'a> Resolver<'a> {
         let def = self.resolve_macro_to_def_inner(scope, path, kind, force);
         if def != Err(Determinacy::Undetermined) {
             // Do not report duplicated errors on every undetermined resolution.
-            path.segments.iter().find(|segment| segment.parameters.is_some()).map(|segment| {
-                self.session.span_err(segment.parameters.as_ref().unwrap().span(),
+            path.segments.iter().find(|segment| segment.args.is_some()).map(|segment| {
+                self.session.span_err(segment.args.as_ref().unwrap().span(),
                                       "generic arguments in macro path");
             });
         }
@@ -422,10 +452,17 @@ impl<'a> Resolver<'a> {
                                   kind: MacroKind, force: bool)
                                   -> Result<Def, Determinacy> {
         let ast::Path { ref segments, span } = *path;
-        let path: Vec<_> = segments.iter().map(|seg| seg.ident).collect();
+        let mut path: Vec<_> = segments.iter().map(|seg| seg.ident).collect();
         let invocation = self.invocations[&scope];
         let module = invocation.module.get();
         self.current_module = if module.is_trait() { module.parent.unwrap() } else { module };
+
+        // Possibly apply the macro helper hack
+        if self.use_extern_macros && kind == MacroKind::Bang && path.len() == 1 &&
+           path[0].span.ctxt().outer().expn_info().map_or(false, |info| info.local_inner_macros) {
+            let root = Ident::new(keywords::DollarCrate.name(), path[0].span);
+            path.insert(0, root);
+        }
 
         if path.len() > 1 {
             if !self.use_extern_macros && self.gated_errors.insert(span) {
@@ -476,7 +513,7 @@ impl<'a> Resolver<'a> {
         };
 
         self.current_module.nearest_item_scope().legacy_macro_resolutions.borrow_mut()
-            .push((scope, path[0], span, kind));
+            .push((scope, path[0], kind, result.ok()));
 
         result
     }
@@ -622,10 +659,33 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        for &(mark, ident, span, kind) in module.legacy_macro_resolutions.borrow().iter() {
+        for &(mark, ident, kind, def) in module.legacy_macro_resolutions.borrow().iter() {
+            let span = ident.span;
             let legacy_scope = &self.invocations[&mark].legacy_scope;
             let legacy_resolution = self.resolve_legacy_scope(legacy_scope, ident, true);
             let resolution = self.resolve_lexical_macro_path_segment(ident, MacroNS, true, span);
+
+            let check_consistency = |this: &Self, binding: MacroBinding| {
+                if let Some(def) = def {
+                    if this.ambiguity_errors.is_empty() && this.disallowed_shadowing.is_empty() &&
+                       binding.def_ignoring_ambiguity() != def {
+                        // Make sure compilation does not succeed if preferred macro resolution
+                        // has changed after the macro had been expanded. In theory all such
+                        // situations should be reported as ambiguity errors, so this is span-bug.
+                        span_bug!(span, "inconsistent resolution for a macro");
+                    }
+                } else {
+                    // It's possible that the macro was unresolved (indeterminate) and silently
+                    // expanded into a dummy fragment for recovery during expansion.
+                    // Now, post-expansion, the resolution may succeed, but we can't change the
+                    // past and need to report an error.
+                    let msg =
+                        format!("cannot determine resolution for the {} `{}`", kind.descr(), ident);
+                    let msg_note = "import resolution is stuck, try simplifying macro imports";
+                    this.session.struct_span_err(span, &msg).note(msg_note).emit();
+                }
+            };
+
             match (legacy_resolution, resolution) {
                 (Some(MacroBinding::Legacy(legacy_binding)), Ok(MacroBinding::Modern(binding))) => {
                     let msg1 = format!("`{}` could refer to the macro defined here", ident);
@@ -635,24 +695,35 @@ impl<'a> Resolver<'a> {
                         .span_note(binding.span, &msg2)
                         .emit();
                 },
-                (Some(MacroBinding::Global(binding)), Ok(MacroBinding::Global(_))) => {
-                    self.record_use(ident, MacroNS, binding, span);
-                    self.err_if_macro_use_proc_macro(ident.name, span, binding);
-                },
                 (None, Err(_)) => {
-                    let msg = match kind {
-                        MacroKind::Bang =>
-                            format!("cannot find macro `{}!` in this scope", ident),
-                        MacroKind::Attr =>
-                            format!("cannot find attribute macro `{}` in this scope", ident),
-                        MacroKind::Derive =>
-                            format!("cannot find derive macro `{}` in this scope", ident),
-                    };
+                    assert!(def.is_none());
+                    let bang = if kind == MacroKind::Bang { "!" } else { "" };
+                    let msg =
+                        format!("cannot find {} `{}{}` in this scope", kind.descr(), ident, bang);
                     let mut err = self.session.struct_span_err(span, &msg);
                     self.suggest_macro_name(&ident.as_str(), kind, &mut err, span);
                     err.emit();
                 },
-                _ => {},
+                (Some(MacroBinding::Modern(_)), _) | (_, Ok(MacroBinding::Legacy(_))) => {
+                    span_bug!(span, "impossible macro resolution result");
+                }
+                // OK, unambiguous resolution
+                (Some(binding), Err(_)) | (None, Ok(binding)) |
+                // OK, legacy wins over global even if their definitions are different
+                (Some(binding @ MacroBinding::Legacy(_)), Ok(MacroBinding::Global(_))) |
+                // OK, modern wins over global even if their definitions are different
+                (Some(MacroBinding::Global(_)), Ok(binding @ MacroBinding::Modern(_))) => {
+                    check_consistency(self, binding);
+                }
+                (Some(MacroBinding::Global(binding1)), Ok(MacroBinding::Global(binding2))) => {
+                    if binding1.def() != binding2.def() {
+                        span_bug!(span, "mismatch between same global macro resolutions");
+                    }
+                    check_consistency(self, MacroBinding::Global(binding1));
+
+                    self.record_use(ident, MacroNS, binding1, span);
+                    self.err_if_macro_use_proc_macro(ident.name, span, binding1);
+                },
             };
         }
     }
@@ -708,7 +779,7 @@ impl<'a> Resolver<'a> {
     fn collect_def_ids(&mut self,
                        mark: Mark,
                        invocation: &'a InvocationData<'a>,
-                       expansion: &Expansion) {
+                       fragment: &AstFragment) {
         let Resolver { ref mut invocations, arenas, graph_root, .. } = *self;
         let InvocationData { def_index, .. } = *invocation;
 
@@ -726,7 +797,7 @@ impl<'a> Resolver<'a> {
         let mut def_collector = DefCollector::new(&mut self.definitions, mark);
         def_collector.visit_macro_invoc = Some(visit_macro_invoc);
         def_collector.with_parent(def_index, |def_collector| {
-            expansion.visit_with(def_collector)
+            fragment.visit_with(def_collector)
         });
     }
 
@@ -761,7 +832,6 @@ impl<'a> Resolver<'a> {
                     def: def,
                     vis: ty::Visibility::Public,
                     span: item.span,
-                    is_import: false,
                 });
             } else {
                 self.unused_macros.insert(def_id);
@@ -780,8 +850,6 @@ impl<'a> Resolver<'a> {
     /// Error if `ext` is a Macros 1.1 procedural macro being imported by `#[macro_use]`
     fn err_if_macro_use_proc_macro(&mut self, name: Name, use_span: Span,
                                    binding: &NameBinding<'a>) {
-        use self::SyntaxExtension::*;
-
         let krate = binding.def().def_id().krate;
 
         // Plugin-based syntax extensions are exempt from this check
@@ -791,15 +859,16 @@ impl<'a> Resolver<'a> {
 
         match *ext {
             // If `ext` is a procedural macro, check if we've already warned about it
-            AttrProcMacro(..) | ProcMacro(..) =>
+            SyntaxExtension::AttrProcMacro(..) | SyntaxExtension::ProcMacro { .. } =>
                 if !self.warned_proc_macros.insert(name) { return; },
             _ => return,
         }
 
         let warn_msg = match *ext {
-            AttrProcMacro(..) => "attribute procedural macros cannot be \
-                                  imported with `#[macro_use]`",
-            ProcMacro(..) => "procedural macros cannot be imported with `#[macro_use]`",
+            SyntaxExtension::AttrProcMacro(..) =>
+                "attribute procedural macros cannot be imported with `#[macro_use]`",
+            SyntaxExtension::ProcMacro { .. } =>
+                "procedural macros cannot be imported with `#[macro_use]`",
             _ => return,
         };
 

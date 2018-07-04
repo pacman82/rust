@@ -691,41 +691,6 @@ impl<T> [T] {
         Chunks { v: self, chunk_size: chunk_size }
     }
 
-    /// Returns an iterator over `chunk_size` elements of the slice at a
-    /// time. The chunks are slices and do not overlap. If `chunk_size` does
-    /// not divide the length of the slice, then the last up to `chunk_size-1`
-    /// elements will be omitted.
-    ///
-    /// Due to each chunk having exactly `chunk_size` elements, the compiler
-    /// can often optimize the resulting code better than in the case of
-    /// [`chunks`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `chunk_size` is 0.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(exact_chunks)]
-    ///
-    /// let slice = ['l', 'o', 'r', 'e', 'm'];
-    /// let mut iter = slice.exact_chunks(2);
-    /// assert_eq!(iter.next().unwrap(), &['l', 'o']);
-    /// assert_eq!(iter.next().unwrap(), &['r', 'e']);
-    /// assert!(iter.next().is_none());
-    /// ```
-    ///
-    /// [`chunks`]: #method.chunks
-    #[unstable(feature = "exact_chunks", issue = "47115")]
-    #[inline]
-    pub fn exact_chunks(&self, chunk_size: usize) -> ExactChunks<T> {
-        assert!(chunk_size != 0);
-        let rem = self.len() % chunk_size;
-        let len = self.len() - rem;
-        ExactChunks { v: &self[..len], chunk_size: chunk_size}
-    }
-
     /// Returns an iterator over `chunk_size` elements of the slice at a time.
     /// The chunks are mutable slices, and do not overlap. If `chunk_size` does
     /// not divide the length of the slice, then the last chunk will not
@@ -759,6 +724,41 @@ impl<T> [T] {
     pub fn chunks_mut(&mut self, chunk_size: usize) -> ChunksMut<T> {
         assert!(chunk_size != 0);
         ChunksMut { v: self, chunk_size: chunk_size }
+    }
+
+    /// Returns an iterator over `chunk_size` elements of the slice at a
+    /// time. The chunks are slices and do not overlap. If `chunk_size` does
+    /// not divide the length of the slice, then the last up to `chunk_size-1`
+    /// elements will be omitted.
+    ///
+    /// Due to each chunk having exactly `chunk_size` elements, the compiler
+    /// can often optimize the resulting code better than in the case of
+    /// [`chunks`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `chunk_size` is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(exact_chunks)]
+    ///
+    /// let slice = ['l', 'o', 'r', 'e', 'm'];
+    /// let mut iter = slice.exact_chunks(2);
+    /// assert_eq!(iter.next().unwrap(), &['l', 'o']);
+    /// assert_eq!(iter.next().unwrap(), &['r', 'e']);
+    /// assert!(iter.next().is_none());
+    /// ```
+    ///
+    /// [`chunks`]: #method.chunks
+    #[unstable(feature = "exact_chunks", issue = "47115")]
+    #[inline]
+    pub fn exact_chunks(&self, chunk_size: usize) -> ExactChunks<T> {
+        assert!(chunk_size != 0);
+        let rem = self.len() % chunk_size;
+        let len = self.len() - rem;
+        ExactChunks { v: &self[..len], chunk_size: chunk_size}
     }
 
     /// Returns an iterator over `chunk_size` elements of the slice at a time.
@@ -1230,7 +1230,7 @@ impl<T> [T] {
     /// assert_eq!(s.binary_search(&4),   Err(7));
     /// assert_eq!(s.binary_search(&100), Err(13));
     /// let r = s.binary_search(&1);
-    /// assert!(match r { Ok(1...4) => true, _ => false, });
+    /// assert!(match r { Ok(1..=4) => true, _ => false, });
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn binary_search(&self, x: &T) -> Result<usize, usize>
@@ -1268,7 +1268,7 @@ impl<T> [T] {
     /// assert_eq!(s.binary_search_by(|probe| probe.cmp(&seek)), Err(13));
     /// let seek = 1;
     /// let r = s.binary_search_by(|probe| probe.cmp(&seek));
-    /// assert!(match r { Ok(1...4) => true, _ => false, });
+    /// assert!(match r { Ok(1..=4) => true, _ => false, });
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -1325,7 +1325,7 @@ impl<T> [T] {
     /// assert_eq!(s.binary_search_by_key(&4, |&(a,b)| b),   Err(7));
     /// assert_eq!(s.binary_search_by_key(&100, |&(a,b)| b), Err(13));
     /// let r = s.binary_search_by_key(&1, |&(a,b)| b);
-    /// assert!(match r { Ok(1...4) => true, _ => false, });
+    /// assert!(match r { Ok(1..=4) => true, _ => false, });
     /// ```
     #[stable(feature = "slice_binary_search_by_key", since = "1.10.0")]
     #[inline]
@@ -1642,8 +1642,8 @@ impl<T> [T] {
     /// [`split_at_mut`]: #method.split_at_mut
     #[stable(feature = "copy_from_slice", since = "1.9.0")]
     pub fn copy_from_slice(&mut self, src: &[T]) where T: Copy {
-        assert!(self.len() == src.len(),
-                "destination and source slices have different lengths");
+        assert_eq!(self.len(), src.len(),
+                   "destination and source slices have different lengths");
         unsafe {
             ptr::copy_nonoverlapping(
                 src.as_ptr(), self.as_mut_ptr(), self.len());
@@ -1708,7 +1708,6 @@ impl<T> [T] {
     }
 
     /// Function to calculate lenghts of the middle and trailing slice for `align_to{,_mut}`.
-    #[cfg(not(stage0))]
     fn align_to_offsets<U>(&self) -> (usize, usize) {
         // What we gonna do about `rest` is figure out what multiple of `U`s we can put in a
         // lowest number of `T`s. And how many `T`s we need for each such "multiple".
@@ -1798,7 +1797,6 @@ impl<T> [T] {
     /// }
     /// ```
     #[unstable(feature = "slice_align_to", issue = "44488")]
-    #[cfg(not(stage0))]
     pub unsafe fn align_to<U>(&self) -> (&[T], &[U], &[T]) {
         // Note that most of this function will be constant-evaluated,
         if ::mem::size_of::<U>() == 0 || ::mem::size_of::<T>() == 0 {
@@ -1851,7 +1849,6 @@ impl<T> [T] {
     /// }
     /// ```
     #[unstable(feature = "slice_align_to", issue = "44488")]
-    #[cfg(not(stage0))]
     pub unsafe fn align_to_mut<U>(&mut self) -> (&mut [T], &mut [U], &mut [T]) {
         // Note that most of this function will be constant-evaluated,
         if ::mem::size_of::<U>() == 0 || ::mem::size_of::<T>() == 0 {
@@ -1977,35 +1974,63 @@ fn slice_index_overflow_fail() -> ! {
     panic!("attempted to index slice up to maximum usize");
 }
 
+mod private_slice_index {
+    use super::ops;
+    #[stable(feature = "slice_get_slice", since = "1.28.0")]
+    pub trait Sealed {}
+
+    #[stable(feature = "slice_get_slice", since = "1.28.0")]
+    impl Sealed for usize {}
+    #[stable(feature = "slice_get_slice", since = "1.28.0")]
+    impl Sealed for ops::Range<usize> {}
+    #[stable(feature = "slice_get_slice", since = "1.28.0")]
+    impl Sealed for ops::RangeTo<usize> {}
+    #[stable(feature = "slice_get_slice", since = "1.28.0")]
+    impl Sealed for ops::RangeFrom<usize> {}
+    #[stable(feature = "slice_get_slice", since = "1.28.0")]
+    impl Sealed for ops::RangeFull {}
+    #[stable(feature = "slice_get_slice", since = "1.28.0")]
+    impl Sealed for ops::RangeInclusive<usize> {}
+    #[stable(feature = "slice_get_slice", since = "1.28.0")]
+    impl Sealed for ops::RangeToInclusive<usize> {}
+}
+
 /// A helper trait used for indexing operations.
-#[unstable(feature = "slice_get_slice", issue = "35729")]
+#[stable(feature = "slice_get_slice", since = "1.28.0")]
 #[rustc_on_unimplemented = "slice indices are of type `usize` or ranges of `usize`"]
-pub trait SliceIndex<T: ?Sized> {
+pub trait SliceIndex<T: ?Sized>: private_slice_index::Sealed {
     /// The output type returned by methods.
+    #[stable(feature = "slice_get_slice", since = "1.28.0")]
     type Output: ?Sized;
 
     /// Returns a shared reference to the output at this location, if in
     /// bounds.
+    #[unstable(feature = "slice_index_methods", issue = "0")]
     fn get(self, slice: &T) -> Option<&Self::Output>;
 
     /// Returns a mutable reference to the output at this location, if in
     /// bounds.
+    #[unstable(feature = "slice_index_methods", issue = "0")]
     fn get_mut(self, slice: &mut T) -> Option<&mut Self::Output>;
 
     /// Returns a shared reference to the output at this location, without
     /// performing any bounds checking.
+    #[unstable(feature = "slice_index_methods", issue = "0")]
     unsafe fn get_unchecked(self, slice: &T) -> &Self::Output;
 
     /// Returns a mutable reference to the output at this location, without
     /// performing any bounds checking.
+    #[unstable(feature = "slice_index_methods", issue = "0")]
     unsafe fn get_unchecked_mut(self, slice: &mut T) -> &mut Self::Output;
 
     /// Returns a shared reference to the output at this location, panicking
     /// if out of bounds.
+    #[unstable(feature = "slice_index_methods", issue = "0")]
     fn index(self, slice: &T) -> &Self::Output;
 
     /// Returns a mutable reference to the output at this location, panicking
     /// if out of bounds.
+    #[unstable(feature = "slice_index_methods", issue = "0")]
     fn index_mut(self, slice: &mut T) -> &mut Self::Output;
 }
 
@@ -2513,6 +2538,12 @@ macro_rules! iterator {
                 accum
             }
         }
+
+        #[stable(feature = "fused", since = "1.26.0")]
+        impl<'a, T> FusedIterator for $name<'a, T> {}
+
+        #[unstable(feature = "trusted_len", issue = "37572")]
+        unsafe impl<'a, T> TrustedLen for $name<'a, T> {}
     }
 }
 
@@ -2639,12 +2670,6 @@ impl<'a, T> ExactSizeIterator for Iter<'a, T> {
     }
 }
 
-#[stable(feature = "fused", since = "1.26.0")]
-impl<'a, T> FusedIterator for Iter<'a, T> {}
-
-#[unstable(feature = "trusted_len", issue = "37572")]
-unsafe impl<'a, T> TrustedLen for Iter<'a, T> {}
-
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T> Clone for Iter<'a, T> {
     fn clone(&self) -> Iter<'a, T> { Iter { ptr: self.ptr, end: self.end, _marker: self._marker } }
@@ -2706,9 +2731,7 @@ impl<'a, T> IterMut<'a, T> {
     /// View the underlying data as a subslice of the original data.
     ///
     /// To avoid creating `&mut` references that alias, this is forced
-    /// to consume the iterator. Consider using the `Slice` and
-    /// `SliceMut` implementations for obtaining slices with more
-    /// restricted lifetimes that do not consume the iterator.
+    /// to consume the iterator.
     ///
     /// # Examples
     ///
@@ -2766,13 +2789,6 @@ impl<'a, T> ExactSizeIterator for IterMut<'a, T> {
         self.ptr == self.end
     }
 }
-
-#[stable(feature = "fused", since = "1.26.0")]
-impl<'a, T> FusedIterator for IterMut<'a, T> {}
-
-#[unstable(feature = "trusted_len", issue = "37572")]
-unsafe impl<'a, T> TrustedLen for IterMut<'a, T> {}
-
 
 // Return the number of elements of `T` from `start` to `end`.
 // Return the arithmetic difference if `T` is zero size.
@@ -3371,6 +3387,9 @@ impl<'a, T> DoubleEndedIterator for Windows<'a, T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T> ExactSizeIterator for Windows<'a, T> {}
 
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<'a, T> TrustedLen for Windows<'a, T> {}
+
 #[stable(feature = "fused", since = "1.26.0")]
 impl<'a, T> FusedIterator for Windows<'a, T> {}
 
@@ -3490,6 +3509,9 @@ impl<'a, T> DoubleEndedIterator for Chunks<'a, T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T> ExactSizeIterator for Chunks<'a, T> {}
 
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<'a, T> TrustedLen for Chunks<'a, T> {}
+
 #[stable(feature = "fused", since = "1.26.0")]
 impl<'a, T> FusedIterator for Chunks<'a, T> {}
 
@@ -3606,6 +3628,9 @@ impl<'a, T> DoubleEndedIterator for ChunksMut<'a, T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T> ExactSizeIterator for ChunksMut<'a, T> {}
 
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<'a, T> TrustedLen for ChunksMut<'a, T> {}
+
 #[stable(feature = "fused", since = "1.26.0")]
 impl<'a, T> FusedIterator for ChunksMut<'a, T> {}
 
@@ -3716,6 +3741,9 @@ impl<'a, T> ExactSizeIterator for ExactChunks<'a, T> {
     }
 }
 
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<'a, T> TrustedLen for ExactChunks<'a, T> {}
+
 #[unstable(feature = "exact_chunks", issue = "47115")]
 impl<'a, T> FusedIterator for ExactChunks<'a, T> {}
 
@@ -3813,6 +3841,9 @@ impl<'a, T> ExactSizeIterator for ExactChunksMut<'a, T> {
     }
 }
 
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<'a, T> TrustedLen for ExactChunksMut<'a, T> {}
+
 #[unstable(feature = "exact_chunks", issue = "47115")]
 impl<'a, T> FusedIterator for ExactChunksMut<'a, T> {}
 
@@ -3839,10 +3870,11 @@ unsafe impl<'a, T> TrustedRandomAccess for ExactChunksMut<'a, T> {
 /// valid for `len` elements, nor whether the lifetime inferred is a suitable
 /// lifetime for the returned slice.
 ///
-/// `p` must be non-null, even for zero-length slices, because non-zero bits
-/// are required to distinguish between a zero-length slice within `Some()`
-/// from `None`. `p` can be a bogus non-dereferencable pointer, such as `0x1`,
-/// for zero-length slices, though.
+/// `data` must be non-null and aligned, even for zero-length slices. One
+/// reason for this is that enum layout optimizations may rely on references
+/// (including slices of any length) being aligned and non-null to distinguish
+/// them from other data. You can obtain a pointer that is usable as `data`
+/// for zero-length slices using [`NonNull::dangling()`].
 ///
 /// # Caveat
 ///
@@ -3864,6 +3896,8 @@ unsafe impl<'a, T> TrustedRandomAccess for ExactChunksMut<'a, T> {
 ///     let slice = slice::from_raw_parts(ptr, amt);
 /// }
 /// ```
+///
+/// [`NonNull::dangling()`]: ../../std/ptr/struct.NonNull.html#method.dangling
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
@@ -3875,8 +3909,8 @@ pub unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
 ///
 /// This function is unsafe for the same reasons as `from_raw_parts`, as well
 /// as not being able to provide a non-aliasing guarantee of the returned
-/// mutable slice. `p` must be non-null even for zero-length slices as with
-/// `from_raw_parts`.
+/// mutable slice. `data` must be non-null and aligned even for zero-length
+/// slices as with `from_raw_parts`.
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub unsafe fn from_raw_parts_mut<'a, T>(data: *mut T, len: usize) -> &'a mut [T] {

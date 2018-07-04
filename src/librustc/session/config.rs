@@ -494,6 +494,13 @@ impl Input {
             Input::Str { .. } => "rust_out".to_string(),
         }
     }
+
+    pub fn get_input(&mut self) -> Option<&mut String> {
+        match *self {
+            Input::File(_) => None,
+            Input::Str { ref mut input, .. } => Some(input),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1290,12 +1297,18 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         useful for profiling / PGO."),
     relro_level: Option<RelroLevel> = (None, parse_relro_level, [TRACKED],
         "choose which RELRO level to use"),
+    disable_ast_check_for_mutation_in_guard: bool = (false, parse_bool, [UNTRACKED],
+        "skip AST-based mutation-in-guard check (mir-borrowck provides more precise check)"),
     nll_subminimal_causes: bool = (false, parse_bool, [UNTRACKED],
         "when tracking region error causes, accept subminimal results for faster execution."),
     nll_facts: bool = (false, parse_bool, [UNTRACKED],
                        "dump facts from NLL analysis into side files"),
     disable_nll_user_type_assert: bool = (false, parse_bool, [UNTRACKED],
         "disable user provided type assertion in NLL"),
+    nll_dont_emit_read_for_match: bool = (false, parse_bool, [UNTRACKED],
+        "in match codegen, do not include ReadForMatch statements (used by mir-borrowck)"),
+    polonius: bool = (false, parse_bool, [UNTRACKED],
+        "enable polonius-based borrow-checker"),
     codegen_time_graph: bool = (false, parse_bool, [UNTRACKED],
         "generate a graphical HTML report of time spent in codegen and LLVM"),
     thinlto: Option<bool> = (None, parse_opt_bool, [TRACKED],
@@ -1791,19 +1804,7 @@ pub fn build_session_options_and_crate_config(
             Some("human") => ErrorOutputType::HumanReadable(color),
             Some("json") => ErrorOutputType::Json(false),
             Some("pretty-json") => ErrorOutputType::Json(true),
-            Some("short") => {
-                if nightly_options::is_unstable_enabled(matches) {
-                    ErrorOutputType::Short(color)
-                } else {
-                    early_error(
-                        ErrorOutputType::default(),
-                        &format!(
-                            "the `-Z unstable-options` flag must also be passed to \
-                             enable the short error message option"
-                        ),
-                    );
-                }
-            }
+            Some("short") => ErrorOutputType::Short(color),
             None => ErrorOutputType::HumanReadable(color),
 
             Some(arg) => early_error(
@@ -1966,6 +1967,13 @@ pub fn build_session_options_and_crate_config(
         early_error(
             error_format,
             "can't perform LTO when compiling incrementally",
+        );
+    }
+
+    if debugging_opts.profile && incremental.is_some() {
+        early_error(
+            error_format,
+            "can't instrument with gcov profiling when compiling incrementally",
         );
     }
 

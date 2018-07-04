@@ -319,13 +319,10 @@ pub fn panicking() -> bool {
 
 /// Entry point of panic from the libcore crate.
 #[cfg(not(test))]
-#[lang = "panic_fmt"]
+#[panic_implementation]
 #[unwind(allowed)]
-pub extern fn rust_begin_panic(msg: fmt::Arguments,
-                               file: &'static str,
-                               line: u32,
-                               col: u32) -> ! {
-    begin_panic_fmt(&msg, &(file, line, col))
+pub fn rust_begin_panic(info: &PanicInfo) -> ! {
+    continue_panic_fmt(&info)
 }
 
 /// The entry point for panicking with a formatted message.
@@ -340,15 +337,15 @@ pub extern fn rust_begin_panic(msg: fmt::Arguments,
 #[inline(never)] #[cold]
 pub fn begin_panic_fmt(msg: &fmt::Arguments,
                        file_line_col: &(&'static str, u32, u32)) -> ! {
-    use fmt::Write;
+    let (file, line, col) = *file_line_col;
+    let info = PanicInfo::internal_constructor(
+        Some(msg),
+        Location::internal_constructor(file, line, col),
+    );
+    continue_panic_fmt(&info)
+}
 
-    // We do two allocations here, unfortunately. But (a) they're
-    // required with the current scheme, and (b) we don't handle
-    // panic + OOM properly anyway (see comment in begin_panic
-    // below).
-
-    rust_panic_with_hook(&mut PanicPayload::new(msg), Some(msg), file_line_col);
-
+fn continue_panic_fmt(info: &PanicInfo) -> ! {
     struct PanicPayload<'a> {
         inner: &'a fmt::Arguments<'a>,
         string: Option<String>,
@@ -360,6 +357,8 @@ pub fn begin_panic_fmt(msg: &fmt::Arguments,
         }
 
         fn fill(&mut self) -> &mut String {
+            use fmt::Write;
+
             let inner = self.inner;
             self.string.get_or_insert_with(|| {
                 let mut s = String::new();
@@ -379,6 +378,19 @@ pub fn begin_panic_fmt(msg: &fmt::Arguments,
             self.fill()
         }
     }
+
+    // We do two allocations here, unfortunately. But (a) they're
+    // required with the current scheme, and (b) we don't handle
+    // panic + OOM properly anyway (see comment in begin_panic
+    // below).
+
+    let loc = info.location().unwrap(); // The current implementation always returns Some
+    let msg = info.message().unwrap(); // The current implementation always returns Some
+    let file_line_col = (loc.file(), loc.line(), loc.column());
+    rust_panic_with_hook(
+        &mut PanicPayload::new(msg),
+        info.message(),
+        &file_line_col);
 }
 
 /// This is the entry point of panicking for panic!() and assert!().
@@ -431,7 +443,7 @@ pub fn begin_panic<M: Any + Send>(msg: M, file_line_col: &(&'static str, u32, u3
 /// abort or unwind.
 fn rust_panic_with_hook(payload: &mut BoxMeUp,
                         message: Option<&fmt::Arguments>,
-                        file_line_col: &(&'static str, u32, u32)) -> ! {
+                        file_line_col: &(&str, u32, u32)) -> ! {
     let (file, line, col) = *file_line_col;
 
     let panics = update_panic_count(1);

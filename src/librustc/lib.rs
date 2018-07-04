@@ -45,12 +45,10 @@
 #![feature(const_fn)]
 #![feature(core_intrinsics)]
 #![feature(drain_filter)]
-#![feature(entry_or_default)]
 #![feature(from_ref)]
 #![feature(fs_read_write)]
 #![feature(iterator_find_map)]
 #![cfg_attr(windows, feature(libc))]
-#![cfg_attr(stage0, feature(macro_lifetime_matcher))]
 #![feature(macro_vis_matcher)]
 #![feature(never_type)]
 #![feature(exhaustive_patterns)]
@@ -67,10 +65,13 @@
 #![feature(unboxed_closures)]
 #![feature(trace_macros)]
 #![feature(trusted_len)]
+#![feature(vec_remove_item)]
 #![feature(catch_expr)]
+#![feature(integer_atomics)]
 #![feature(test)]
 #![feature(in_band_lifetimes)]
 #![feature(macro_at_most_once_rep)]
+#![feature(inclusive_range_methods)]
 
 #![recursion_limit="512"]
 
@@ -81,13 +82,17 @@ extern crate fmt_macros;
 extern crate getopts;
 extern crate graphviz;
 #[macro_use] extern crate lazy_static;
+#[macro_use] extern crate scoped_tls;
 #[cfg(windows)]
 extern crate libc;
 extern crate polonius_engine;
 extern crate rustc_target;
 #[macro_use] extern crate rustc_data_structures;
 extern crate serialize;
+extern crate parking_lot;
 extern crate rustc_errors as errors;
+extern crate rustc_rayon as rayon;
+extern crate rustc_rayon_core as rayon_core;
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
 extern crate syntax_pos;
@@ -126,7 +131,6 @@ pub mod middle {
     pub mod allocator;
     pub mod borrowck;
     pub mod expr_use_visitor;
-    pub mod const_val;
     pub mod cstore;
     pub mod dataflow;
     pub mod dead;

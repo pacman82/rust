@@ -25,12 +25,12 @@ use rustc::hir::def_id::{CrateNum, DefId, DefIndex,
 use rustc::ich::Fingerprint;
 use rustc::middle::lang_items;
 use rustc::mir::{self, interpret};
+use rustc::mir::interpret::AllocDecodingSession;
 use rustc::session::Session;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::codec::TyDecoder;
 use rustc::mir::Mir;
 use rustc::util::captures::Captures;
-use rustc::util::nodemap::FxHashMap;
 
 use std::io;
 use std::mem;
@@ -55,11 +55,8 @@ pub struct DecodeContext<'a, 'tcx: 'a> {
 
     lazy_state: LazyState,
 
-    // interpreter allocation cache
-    interpret_alloc_cache: FxHashMap<usize, interpret::AllocId>,
-
-    // Read from the LazySeq CrateRoot::inpterpret_alloc_index on demand
-    interpret_alloc_index: Option<Vec<u32>>,
+    // Used for decoding interpret::AllocIds in a cached & thread-safe manner.
+    alloc_decoding_session: Option<AllocDecodingSession<'a>>,
 }
 
 /// Abstract over the various ways one can create metadata decoders.
@@ -78,8 +75,9 @@ pub trait Metadata<'a, 'tcx>: Copy {
             tcx,
             last_filemap_index: 0,
             lazy_state: LazyState::NoNode,
-            interpret_alloc_cache: FxHashMap::default(),
-            interpret_alloc_index: None,
+            alloc_decoding_session: self.cdata().map(|cdata| {
+                cdata.alloc_decoding_state.new_decoding_session()
+            }),
         }
     }
 }
@@ -177,17 +175,6 @@ impl<'a, 'tcx> DecodeContext<'a, 'tcx> {
         };
         self.lazy_state = LazyState::Previous(position + min_size);
         Ok(position)
-    }
-
-    fn interpret_alloc(&mut self, idx: usize) -> usize {
-        if let Some(index) = self.interpret_alloc_index.as_mut() {
-            return index[idx] as usize;
-        }
-        let cdata = self.cdata();
-        let index: Vec<u32> = cdata.root.interpret_alloc_index.decode(cdata).collect();
-        let pos = index[idx];
-        self.interpret_alloc_index = Some(index);
-        pos as usize
     }
 }
 
@@ -299,22 +286,11 @@ impl<'a, 'tcx> SpecializedDecoder<LocalDefId> for DecodeContext<'a, 'tcx> {
 
 impl<'a, 'tcx> SpecializedDecoder<interpret::AllocId> for DecodeContext<'a, 'tcx> {
     fn specialized_decode(&mut self) -> Result<interpret::AllocId, Self::Error> {
-        let tcx = self.tcx.unwrap();
-        let idx = usize::decode(self)?;
-
-        if let Some(cached) = self.interpret_alloc_cache.get(&idx).cloned() {
-            return Ok(cached);
+        if let Some(alloc_decoding_session) = self.alloc_decoding_session {
+            alloc_decoding_session.decode_alloc_id(self)
+        } else {
+            bug!("Attempting to decode interpret::AllocId without CrateMetadata")
         }
-        let pos = self.interpret_alloc(idx);
-        self.with_position(pos, |this| {
-            interpret::specialized_decode_alloc_id(
-                this,
-                tcx,
-                |this, alloc_id| {
-                    assert!(this.interpret_alloc_cache.insert(idx, alloc_id).is_none());
-                },
-            )
-        })
     }
 }
 
@@ -443,6 +419,7 @@ impl<'tcx> EntryKind<'tcx> {
             EntryKind::ForeignFn(_) => Def::Fn(did),
             EntryKind::Method(_) => Def::Method(did),
             EntryKind::Type => Def::TyAlias(did),
+            EntryKind::Existential => Def::Existential(did),
             EntryKind::AssociatedType(_) => Def::AssociatedTy(did),
             EntryKind::Mod(_) => Def::Mod(did),
             EntryKind::Variant(_) => Def::Variant(did),
@@ -586,6 +563,13 @@ impl<'a, 'tcx> CrateMetadata {
         self.entry(item_id).predicates.unwrap().decode((self, tcx))
     }
 
+    pub fn get_predicates_defined_on(&self,
+                                   item_id: DefIndex,
+                                   tcx: TyCtxt<'a, 'tcx, 'tcx>)
+                                   -> ty::GenericPredicates<'tcx> {
+        self.entry(item_id).predicates_defined_on.unwrap().decode((self, tcx))
+    }
+
     pub fn get_super_predicates(&self,
                                 item_id: DefIndex,
                                 tcx: TyCtxt<'a, 'tcx, 'tcx>)
@@ -689,7 +673,6 @@ impl<'a, 'tcx> CrateMetadata {
                         def: def,
                         vis: ty::Visibility::Public,
                         span: DUMMY_SP,
-                        is_import: false,
                     });
                 }
             }
@@ -729,7 +712,6 @@ impl<'a, 'tcx> CrateMetadata {
                                     ident: Ident::from_interned_str(self.item_name(child_index)),
                                     vis: self.get_visibility(child_index),
                                     span: self.entry(child_index).span.decode((self, sess)),
-                                    is_import: false,
                                 });
                             }
                         }
@@ -746,8 +728,7 @@ impl<'a, 'tcx> CrateMetadata {
                     (self.get_def(child_index), def_key.disambiguated_data.data.get_opt_name()) {
                     let ident = Ident::from_interned_str(name);
                     let vis = self.get_visibility(child_index);
-                    let is_import = false;
-                    callback(def::Export { def, ident, vis, span, is_import });
+                    callback(def::Export { def, ident, vis, span });
                     // For non-re-export structs and variants add their constructors to children.
                     // Re-export lists automatically contain constructors when necessary.
                     match def {
@@ -758,7 +739,7 @@ impl<'a, 'tcx> CrateMetadata {
                                 callback(def::Export {
                                     def: ctor_def,
                                     vis: self.get_visibility(ctor_def_id.index),
-                                    ident, span, is_import,
+                                    ident, span,
                                 });
                             }
                         }
@@ -768,7 +749,7 @@ impl<'a, 'tcx> CrateMetadata {
                             let ctor_kind = self.get_ctor_kind(child_index);
                             let ctor_def = Def::VariantCtor(def_id, ctor_kind);
                             let vis = self.get_visibility(child_index);
-                            callback(def::Export { def: ctor_def, ident, vis, span, is_import });
+                            callback(def::Export { def: ctor_def, ident, vis, span });
                         }
                         _ => {}
                     }
@@ -843,7 +824,7 @@ impl<'a, 'tcx> CrateMetadata {
         };
 
         ty::AssociatedItem {
-            name: name.as_symbol(),
+            ident: Ident::from_interned_str(name),
             kind,
             vis: item.visibility.decode(self),
             defaultness: container.defaultness(),
@@ -1164,9 +1145,9 @@ impl<'a, 'tcx> CrateMetadata {
                                       src_hash,
                                       start_pos,
                                       end_pos,
-                                      lines,
-                                      multibyte_chars,
-                                      non_narrow_chars,
+                                      mut lines,
+                                      mut multibyte_chars,
+                                      mut non_narrow_chars,
                                       name_hash,
                                       .. } = filemap_to_import;
 
@@ -1177,15 +1158,12 @@ impl<'a, 'tcx> CrateMetadata {
             // `CodeMap::new_imported_filemap()` will then translate those
             // coordinates to their new global frame of reference when the
             // offset of the FileMap is known.
-            let mut lines = lines.into_inner();
             for pos in &mut lines {
                 *pos = *pos - start_pos;
             }
-            let mut multibyte_chars = multibyte_chars.into_inner();
             for mbc in &mut multibyte_chars {
                 mbc.pos = mbc.pos - start_pos;
             }
-            let mut non_narrow_chars = non_narrow_chars.into_inner();
             for swc in &mut non_narrow_chars {
                 *swc = *swc - start_pos;
             }

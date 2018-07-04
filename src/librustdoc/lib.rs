@@ -18,11 +18,13 @@
 #![feature(box_patterns)]
 #![feature(box_syntax)]
 #![feature(fs_read_write)]
+#![feature(iterator_find_map)]
 #![feature(set_stdio)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(test)]
 #![feature(vec_remove_item)]
 #![feature(entry_and_modify)]
+#![feature(ptr_offset_from)]
 
 #![recursion_limit="256"]
 
@@ -45,7 +47,7 @@ extern crate test as testing;
 #[macro_use] extern crate log;
 extern crate rustc_errors as errors;
 extern crate pulldown_cmark;
-extern crate tempdir;
+extern crate tempfile;
 extern crate minifier;
 
 extern crate serialize as rustc_serialize; // used by deriving
@@ -101,10 +103,14 @@ struct Output {
 }
 
 pub fn main() {
-    const STACK_SIZE: usize = 32_000_000; // 32MB
+    let thread_stack_size: usize = if cfg!(target_os = "haiku") {
+        16_000_000 // 16MB on Haiku
+    } else {
+        32_000_000 // 32MB on other platforms
+    };
     rustc_driver::set_sigpipe_handler();
     env_logger::init();
-    let res = std::thread::Builder::new().stack_size(STACK_SIZE).spawn(move || {
+    let res = std::thread::Builder::new().stack_size(thread_stack_size).spawn(move || {
         syntax::with_globals(move || {
             get_args().map(|args| main_args(&args)).unwrap_or(1)
         })

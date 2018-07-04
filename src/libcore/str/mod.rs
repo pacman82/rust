@@ -21,7 +21,7 @@ use char;
 use fmt;
 use iter::{Map, Cloned, FusedIterator, TrustedLen, Filter};
 use iter_private::TrustedRandomAccess;
-use slice::{self, SliceIndex};
+use slice::{self, SliceIndex, Split as SliceSplit};
 use mem;
 
 pub mod pattern;
@@ -374,37 +374,6 @@ pub fn from_utf8(v: &[u8]) -> Result<&str, Utf8Error> {
 pub fn from_utf8_mut(v: &mut [u8]) -> Result<&mut str, Utf8Error> {
     run_utf8_validation(v)?;
     Ok(unsafe { from_utf8_unchecked_mut(v) })
-}
-
-/// Forms a str from a pointer and a length.
-///
-/// The `len` argument is the number of bytes in the string.
-///
-/// # Safety
-///
-/// This function is unsafe as there is no guarantee that the given pointer is
-/// valid for `len` bytes, nor whether the lifetime inferred is a suitable
-/// lifetime for the returned str.
-///
-/// The data must be valid UTF-8
-///
-/// `p` must be non-null, even for zero-length strs, because non-zero bits
-/// are required to distinguish between a zero-length str within `Some()`
-/// from `None`. `p` can be a bogus non-dereferencable pointer, such as `0x1`,
-/// for zero-length strs, though.
-///
-/// # Caveat
-///
-/// The lifetime for the returned str is inferred from its usage. To
-/// prevent accidental misuse, it's suggested to tie the lifetime to whichever
-/// source lifetime is safe in the context, such as by providing a helper
-/// function taking the lifetime of a host value for the str, or by explicit
-/// annotation.
-/// Performs the same functionality as `from_raw_parts`, except that a mutable
-/// str is returned.
-///
-unsafe fn from_raw_parts_mut<'a>(p: *mut u8, len: usize) -> &'a mut str {
-    from_utf8_unchecked_mut(slice::from_raw_parts_mut(p, len))
 }
 
 /// Converts a slice of bytes to a string slice without checking
@@ -1515,10 +1484,10 @@ fn run_utf8_validation(v: &[u8]) -> Result<(), Utf8Error> {
                 },
                 3 => {
                     match (first, next!()) {
-                        (0xE0         , 0xA0 ... 0xBF) |
-                        (0xE1 ... 0xEC, 0x80 ... 0xBF) |
-                        (0xED         , 0x80 ... 0x9F) |
-                        (0xEE ... 0xEF, 0x80 ... 0xBF) => {}
+                        (0xE0         , 0xA0 ..= 0xBF) |
+                        (0xE1 ..= 0xEC, 0x80 ..= 0xBF) |
+                        (0xED         , 0x80 ..= 0x9F) |
+                        (0xEE ..= 0xEF, 0x80 ..= 0xBF) => {}
                         _ => err!(Some(1))
                     }
                     if next!() & !CONT_MASK != TAG_CONT_U8 {
@@ -1527,9 +1496,9 @@ fn run_utf8_validation(v: &[u8]) -> Result<(), Utf8Error> {
                 }
                 4 => {
                     match (first, next!()) {
-                        (0xF0         , 0x90 ... 0xBF) |
-                        (0xF1 ... 0xF3, 0x80 ... 0xBF) |
-                        (0xF4         , 0x80 ... 0x8F) => {}
+                        (0xF0         , 0x90 ..= 0xBF) |
+                        (0xF1 ..= 0xF3, 0x80 ..= 0xBF) |
+                        (0xF4         , 0x80 ..= 0x8F) => {}
                         _ => err!(Some(1))
                     }
                     if next!() & !CONT_MASK != TAG_CONT_U8 {
@@ -2602,8 +2571,11 @@ impl str {
             let len = self.len();
             let ptr = self.as_ptr() as *mut u8;
             unsafe {
-                (from_raw_parts_mut(ptr, mid),
-                 from_raw_parts_mut(ptr.offset(mid as isize), len - mid))
+                (from_utf8_unchecked_mut(slice::from_raw_parts_mut(ptr, mid)),
+                 from_utf8_unchecked_mut(slice::from_raw_parts_mut(
+                    ptr.offset(mid as isize),
+                    len - mid
+                 )))
             }
         } else {
             slice_error_fail(self, 0, mid)
@@ -2750,7 +2722,10 @@ impl str {
     /// the original string slice, separated by any amount of whitespace.
     ///
     /// 'Whitespace' is defined according to the terms of the Unicode Derived
-    /// Core Property `White_Space`.
+    /// Core Property `White_Space`. If you only want to split on ASCII whitespace
+    /// instead, use [`split_ascii_whitespace`].
+    ///
+    /// [`split_ascii_whitespace`]: #method.split_ascii_whitespace
     ///
     /// # Examples
     ///
@@ -2782,6 +2757,53 @@ impl str {
     #[inline]
     pub fn split_whitespace(&self) -> SplitWhitespace {
         SplitWhitespace { inner: self.split(IsWhitespace).filter(IsNotEmpty) }
+    }
+
+    /// Split a string slice by ASCII whitespace.
+    ///
+    /// The iterator returned will return string slices that are sub-slices of
+    /// the original string slice, separated by any amount of ASCII whitespace.
+    ///
+    /// To split by Unicode `Whitespace` instead, use [`split_whitespace`].
+    ///
+    /// [`split_whitespace`]: #method.split_whitespace
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// #![feature(split_ascii_whitespace)]
+    /// let mut iter = "A few words".split_ascii_whitespace();
+    ///
+    /// assert_eq!(Some("A"), iter.next());
+    /// assert_eq!(Some("few"), iter.next());
+    /// assert_eq!(Some("words"), iter.next());
+    ///
+    /// assert_eq!(None, iter.next());
+    /// ```
+    ///
+    /// All kinds of ASCII whitespace are considered:
+    ///
+    /// ```
+    /// let mut iter = " Mary   had\ta little  \n\t lamb".split_whitespace();
+    /// assert_eq!(Some("Mary"), iter.next());
+    /// assert_eq!(Some("had"), iter.next());
+    /// assert_eq!(Some("a"), iter.next());
+    /// assert_eq!(Some("little"), iter.next());
+    /// assert_eq!(Some("lamb"), iter.next());
+    ///
+    /// assert_eq!(None, iter.next());
+    /// ```
+    #[unstable(feature = "split_ascii_whitespace", issue = "48656")]
+    #[inline]
+    pub fn split_ascii_whitespace(&self) -> SplitAsciiWhitespace {
+        let inner = self
+            .as_bytes()
+            .split(IsAsciiWhitespace)
+            .filter(IsNotEmpty)
+            .map(UnsafeBytesToStr);
+        SplitAsciiWhitespace { inner }
     }
 
     /// An iterator over the lines of a string, as string slices.
@@ -3903,6 +3925,12 @@ impl<'a> Default for &'a str {
     fn default() -> &'a str { "" }
 }
 
+#[stable(feature = "default_mut_str", since = "1.28.0")]
+impl<'a> Default for &'a mut str {
+    /// Creates an empty mutable str
+    fn default() -> &'a mut str { unsafe { from_utf8_unchecked_mut(&mut []) } }
+}
+
 /// An iterator over the non-whitespace substrings of a string,
 /// separated by any amount of whitespace.
 ///
@@ -3915,6 +3943,20 @@ impl<'a> Default for &'a str {
 #[derive(Clone, Debug)]
 pub struct SplitWhitespace<'a> {
     inner: Filter<Split<'a, IsWhitespace>, IsNotEmpty>,
+}
+
+/// An iterator over the non-ASCII-whitespace substrings of a string,
+/// separated by any amount of ASCII whitespace.
+///
+/// This struct is created by the [`split_ascii_whitespace`] method on [`str`].
+/// See its documentation for more.
+///
+/// [`split_ascii_whitespace`]: ../../std/primitive.str.html#method.split_ascii_whitespace
+/// [`str`]: ../../std/primitive.str.html
+#[unstable(feature = "split_ascii_whitespace", issue = "48656")]
+#[derive(Clone, Debug)]
+pub struct SplitAsciiWhitespace<'a> {
+    inner: Map<Filter<SliceSplit<'a, u8, IsAsciiWhitespace>, IsNotEmpty>, UnsafeBytesToStr>,
 }
 
 #[derive(Clone)]
@@ -3937,21 +3979,75 @@ impl FnMut<(char, )> for IsWhitespace {
 }
 
 #[derive(Clone)]
+struct IsAsciiWhitespace;
+
+impl<'a> FnOnce<(&'a u8, )> for IsAsciiWhitespace {
+    type Output = bool;
+
+    #[inline]
+    extern "rust-call" fn call_once(mut self, arg: (&u8, )) -> bool {
+        self.call_mut(arg)
+    }
+}
+
+impl<'a> FnMut<(&'a u8, )> for IsAsciiWhitespace {
+    #[inline]
+    extern "rust-call" fn call_mut(&mut self, arg: (&u8, )) -> bool {
+        arg.0.is_ascii_whitespace()
+    }
+}
+
+#[derive(Clone)]
 struct IsNotEmpty;
 
 impl<'a, 'b> FnOnce<(&'a &'b str, )> for IsNotEmpty {
     type Output = bool;
 
     #[inline]
-    extern "rust-call" fn call_once(mut self, arg: (&&str, )) -> bool {
+    extern "rust-call" fn call_once(mut self, arg: (&'a &'b str, )) -> bool {
         self.call_mut(arg)
     }
 }
 
 impl<'a, 'b> FnMut<(&'a &'b str, )> for IsNotEmpty {
     #[inline]
-    extern "rust-call" fn call_mut(&mut self, arg: (&&str, )) -> bool {
+    extern "rust-call" fn call_mut(&mut self, arg: (&'a &'b str, )) -> bool {
         !arg.0.is_empty()
+    }
+}
+
+impl<'a, 'b> FnOnce<(&'a &'b [u8], )> for IsNotEmpty {
+    type Output = bool;
+
+    #[inline]
+    extern "rust-call" fn call_once(mut self, arg: (&'a &'b [u8], )) -> bool {
+        self.call_mut(arg)
+    }
+}
+
+impl<'a, 'b> FnMut<(&'a &'b [u8], )> for IsNotEmpty {
+    #[inline]
+    extern "rust-call" fn call_mut(&mut self, arg: (&'a &'b [u8], )) -> bool {
+        !arg.0.is_empty()
+    }
+}
+
+#[derive(Clone)]
+struct UnsafeBytesToStr;
+
+impl<'a> FnOnce<(&'a [u8], )> for UnsafeBytesToStr {
+    type Output = &'a str;
+
+    #[inline]
+    extern "rust-call" fn call_once(mut self, arg: (&'a [u8], )) -> &'a str {
+        self.call_mut(arg)
+    }
+}
+
+impl<'a> FnMut<(&'a [u8], )> for UnsafeBytesToStr {
+    #[inline]
+    extern "rust-call" fn call_mut(&mut self, arg: (&'a [u8], )) -> &'a str {
+        unsafe { from_utf8_unchecked(arg.0) }
     }
 }
 
@@ -3960,13 +4056,20 @@ impl<'a, 'b> FnMut<(&'a &'b str, )> for IsNotEmpty {
 impl<'a> Iterator for SplitWhitespace<'a> {
     type Item = &'a str;
 
+    #[inline]
     fn next(&mut self) -> Option<&'a str> {
         self.inner.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
 #[stable(feature = "split_whitespace", since = "1.1.0")]
 impl<'a> DoubleEndedIterator for SplitWhitespace<'a> {
+    #[inline]
     fn next_back(&mut self) -> Option<&'a str> {
         self.inner.next_back()
     }
@@ -3974,6 +4077,32 @@ impl<'a> DoubleEndedIterator for SplitWhitespace<'a> {
 
 #[stable(feature = "fused", since = "1.26.0")]
 impl<'a> FusedIterator for SplitWhitespace<'a> {}
+
+#[unstable(feature = "split_ascii_whitespace", issue = "48656")]
+impl<'a> Iterator for SplitAsciiWhitespace<'a> {
+    type Item = &'a str;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a str> {
+        self.inner.next()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+#[unstable(feature = "split_ascii_whitespace", issue = "48656")]
+impl<'a> DoubleEndedIterator for SplitAsciiWhitespace<'a> {
+    #[inline]
+    fn next_back(&mut self) -> Option<&'a str> {
+        self.inner.next_back()
+    }
+}
+
+#[unstable(feature = "split_ascii_whitespace", issue = "48656")]
+impl<'a> FusedIterator for SplitAsciiWhitespace<'a> {}
 
 /// An iterator of [`u16`] over the string encoded as UTF-16.
 ///

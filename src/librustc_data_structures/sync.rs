@@ -26,6 +26,8 @@
 //!
 //! `MTLock` is a mutex which disappears if cfg!(parallel_queries) is false.
 //!
+//! `MTRef` is a immutable refernce if cfg!(parallel_queries), and an mutable reference otherwise.
+//!
 //! `rustc_erase_owner!` erases a OwningRef owner into Erased or Erased + Send + Sync
 //! depending on the value of cfg!(parallel_queries).
 
@@ -36,7 +38,6 @@ use std::marker::PhantomData;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::fmt;
-use std;
 use std::ops::{Deref, DerefMut};
 use owning_ref::{Erased, OwningRef};
 
@@ -101,6 +102,35 @@ cfg_if! {
         use std::cell::Cell;
 
         #[derive(Debug)]
+        pub struct WorkerLocal<T>(OneThread<T>);
+
+        impl<T> WorkerLocal<T> {
+            /// Creates a new worker local where the `initial` closure computes the
+            /// value this worker local should take for each thread in the thread pool.
+            #[inline]
+            pub fn new<F: FnMut(usize) -> T>(mut f: F) -> WorkerLocal<T> {
+                WorkerLocal(OneThread::new(f(0)))
+            }
+
+            /// Returns the worker-local value for each thread
+            #[inline]
+            pub fn into_inner(self) -> Vec<T> {
+                vec![OneThread::into_inner(self.0)]
+            }
+        }
+
+        impl<T> Deref for WorkerLocal<T> {
+            type Target = T;
+
+            #[inline(always)]
+            fn deref(&self) -> &T {
+                &*self.0
+            }
+        }
+
+        pub type MTRef<'a, T> = &'a mut T;
+
+        #[derive(Debug)]
         pub struct MTLock<T>(T);
 
         impl<T> MTLock<T> {
@@ -125,13 +155,8 @@ cfg_if! {
             }
 
             #[inline(always)]
-            pub fn borrow(&self) -> &T {
-                &self.0
-            }
-
-            #[inline(always)]
-            pub fn borrow_mut(&self) -> &T {
-                &self.0
+            pub fn lock_mut(&mut self) -> &mut T {
+                &mut self.0
             }
         }
 
@@ -195,13 +220,46 @@ cfg_if! {
         pub use std::sync::Arc as Lrc;
         pub use std::sync::Weak as Weak;
 
-        pub use self::Lock as MTLock;
+        pub type MTRef<'a, T> = &'a T;
+
+        #[derive(Debug)]
+        pub struct MTLock<T>(Lock<T>);
+
+        impl<T> MTLock<T> {
+            #[inline(always)]
+            pub fn new(inner: T) -> Self {
+                MTLock(Lock::new(inner))
+            }
+
+            #[inline(always)]
+            pub fn into_inner(self) -> T {
+                self.0.into_inner()
+            }
+
+            #[inline(always)]
+            pub fn get_mut(&mut self) -> &mut T {
+                self.0.get_mut()
+            }
+
+            #[inline(always)]
+            pub fn lock(&self) -> LockGuard<T> {
+                self.0.lock()
+            }
+
+            #[inline(always)]
+            pub fn lock_mut(&self) -> LockGuard<T> {
+                self.lock()
+            }
+        }
 
         use parking_lot::Mutex as InnerLock;
         use parking_lot::RwLock as InnerRwLock;
 
+        use std;
         use std::thread;
         pub use rayon::{join, scope};
+
+        pub use rayon_core::WorkerLocal;
 
         pub use rayon::iter::ParallelIterator;
         use rayon::iter::IntoParallelIterator;
@@ -492,6 +550,18 @@ impl<T> Lock<T> {
 
     #[cfg(parallel_queries)]
     #[inline(always)]
+    pub fn try_lock(&self) -> Option<LockGuard<T>> {
+        self.0.try_lock()
+    }
+
+    #[cfg(not(parallel_queries))]
+    #[inline(always)]
+    pub fn try_lock(&self) -> Option<LockGuard<T>> {
+        self.0.try_borrow_mut().ok()
+    }
+
+    #[cfg(parallel_queries)]
+    #[inline(always)]
     pub fn lock(&self) -> LockGuard<T> {
         if ERROR_CHECKING {
             self.0.try_lock().expect("lock was already held")
@@ -638,7 +708,9 @@ pub struct OneThread<T> {
     inner: T,
 }
 
+#[cfg(parallel_queries)]
 unsafe impl<T> std::marker::Sync for OneThread<T> {}
+#[cfg(parallel_queries)]
 unsafe impl<T> std::marker::Send for OneThread<T> {}
 
 impl<T> OneThread<T> {
